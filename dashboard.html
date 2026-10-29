@@ -379,13 +379,16 @@ function renderNow() {
   const d = latest;
   if (!d) return;
   const load = d.loadPower_W;
-  const bat = d.batteryPower_W * BAT_CHARGE_SIGN;    // + заряд
+  // + заряд; шум < 50 Вт и «заряд» без источника (заряд от сети выкл, нет солнца) — «покой»
+  const gcOn = ctlState?.items?.find((i) => i.key === 'gridCharge')?.value;
+  let bat = (d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN;
+  if (Math.abs(bat) < 50 || (bat > 0 && gcOn === 0 && !((d.pvPower_W ?? 0) > 50))) bat = 0;
   const grid = d.gridPower_W * GRID_IMPORT_SIGN;    // + из сети
   const mode = MODE_RU[d.workState] || d.workState;
 
   $('f-mode').textContent = mode;
   $('f-grid').textContent = fmtW(Math.abs(grid)); $('f-grid-s').textContent = `${fmt(d.gridVoltage_V)} В · ${fmt(d.gridFrequency_Hz, 2)} Гц`;
-  $('f-bat').textContent = fmtW(Math.abs(bat));   $('f-bat-s').textContent = `${fmt(d.inverterBatteryVoltage_V)} В · ${bat > 5 ? 'заряд' : bat < -5 ? 'разряд' : 'покой'}`;
+  $('f-bat').textContent = fmtW(Math.abs(bat));   $('f-bat-s').textContent = `${fmt(d.inverterBatteryVoltage_V)} В · ${bat > 0 ? 'заряд' : bat < 0 ? 'разряд' : 'покой'}`;
   $('f-load').textContent = fmtW(load); $('f-load-s').textContent = `${d.loadPercent ?? '—'} % · ${fmt(d.inverterVoltage_V)} В`;
 
   const live = (id, w, reverse) => { const el = $(id); el.classList.toggle('on', Math.abs(w) > 5); el.classList.toggle('rev', !!reverse); };
@@ -398,7 +401,7 @@ function renderNow() {
   $('k-load').innerHTML = splitUnit(fmtW(load));
   $('k-load-d').textContent = `${d.loadPercent ?? '—'} % от номинала · ${fmt(d.loadCurrent_A)} А`;
   $('k-bat').innerHTML = `${fmt(d.inverterBatteryVoltage_V)}<small>В</small>`;
-  $('k-bat-d').textContent = `${bat > 5 ? 'заряд' : bat < -5 ? 'разряд' : 'покой'} ${fmtW(Math.abs(bat))} · ${d.batteryCurrent_A ?? '—'} А`;
+  $('k-bat-d').textContent = bat ? `${bat > 0 ? 'заряд' : 'разряд'} ${fmtW(Math.abs(bat))} · ${Math.abs(d.batteryCurrent_A ?? 0)} А` : 'покой';
   $('k-grid').innerHTML = splitUnit(fmtW(Math.abs(grid)));
   $('k-grid-d').textContent = `${grid > 5 ? 'из сети' : grid < -5 ? 'в сеть' : 'нет обмена'} · ${fmt(d.gridVoltage_V)} В`;
 
@@ -421,7 +424,7 @@ function renderNow() {
   ]);
   $('d-pv').innerHTML = kv([
     ['Напряжение', `${fmt(d.inverterBatteryVoltage_V)} В`], ['Ток', `${d.batteryCurrent_A ?? '—'} А`],
-    ['Мощность', `${bat > 5 ? '+' : ''}${fmtW(bat)}`], ['Состояние', bat > 5 ? 'заряд' : bat < -5 ? 'разряд' : 'покой'],
+    ['Мощность', bat ? `${bat > 0 ? '+' : ''}${fmtW(bat)}` : '0 Вт'], ['Состояние', bat > 0 ? 'заряд' : bat < 0 ? 'разряд' : 'покой'],
     ['Заряжено всего', `${fmt(d.accChargerEnergy_kWh)} кВт·ч`], ['Разряжено всего', `${fmt(d.accDischargerEnergy_kWh)} кВт·ч`],
   ]);
   $('d-temp').innerHTML = kv([

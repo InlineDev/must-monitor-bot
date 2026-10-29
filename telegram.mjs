@@ -11,6 +11,14 @@ import crypto from 'node:crypto';
 // Знаки мощностей MUST PV18 — те же, что в dashboard.mjs. После умножения: батарея > 0 — заряд, сеть > 0 — из сети.
 const GRID_IMPORT_SIGN = -1;
 const BAT_CHARGE_SIGN = -1;
+// MUST меряет мощность батареи грубо: около нуля значение «гуляет» на десятки ватт.
+// Меньше BAT_NOISE_W — «покой»; «заряд» при выключенном заряде от сети и без солнца — тоже «покой».
+const BAT_NOISE_W = 50;
+export function batteryFlow(w, gridChargeOn, pvW) {
+  if (w == null || Math.abs(w) < BAT_NOISE_W) return 0;
+  if (w > 0 && gridChargeOn === 0 && !((pvW ?? 0) > BAT_NOISE_W)) return 0;
+  return w;
+}
 
 const MODE_RU = { PowerOn: 'Включение', SelfTest: 'Самотест', OffGrid: 'Автономно (от батареи)', 'Grid-Tie': 'С сетью', ByPass: 'Байпас (от сети)', Stop: 'Стоп', 'Grid charging': 'Заряд от сети' };
 const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -101,7 +109,9 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     const d = getLatest(), st = getStatus();
     if (!d) return '⏳ Данных от инвертора пока нет — жду подключения логгера.';
     const age = Date.now() - d.ts;
-    const grid = (d.gridPower_W ?? 0) * GRID_IMPORT_SIGN, bat = (d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN;
+    const grid = (d.gridPower_W ?? 0) * GRID_IMPORT_SIGN;
+    const gcItem = getControls().items.find((i) => i.key === 'gridCharge');
+    const bat = batteryFlow((d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN, gcItem?.value, d.pvPower_W);
     const gridOn = (d.gridVoltage_V ?? 0) > 170;
     const ctl = getControls();
     const gc = ctl.items.find((i) => i.key === 'gridCharge');
@@ -111,7 +121,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
       `<b>MUST</b> · ${esc(MODE_RU[d.workState] || d.workState)}`,
       '',
       `${gridOn ? '🟢' : '🔴'} <b>Сеть:</b> ${gridOn ? `${n1(d.gridVoltage_V)} В · ${(d.gridFrequency_Hz ?? 0).toFixed(2).replace('.', ',')} Гц${Math.abs(grid) > 5 ? ` · ${grid > 0 ? 'берём' : 'отдаём'} ${fmtW(Math.abs(grid))}` : ''}` : 'нет напряжения'}`,
-      `🔋 <b>Батарея:</b> ${n1(d.inverterBatteryVoltage_V)} В · ${bat > 5 ? `заряд ${fmtW(bat)}` : bat < -5 ? `разряд ${fmtW(-bat)}` : 'покой'}`,
+      `🔋 <b>Батарея:</b> ${n1(d.inverterBatteryVoltage_V)} В · ${bat > 0 ? `заряд ${fmtW(bat)}` : bat < 0 ? `разряд ${fmtW(-bat)}` : 'покой'}`,
       `🏠 <b>Нагрузка:</b> ${fmtW(d.loadPower_W)} (${d.loadPercent ?? '—'} %)`,
       `🔌 <b>Заряд от сети:</b> ${gc?.value == null ? '—' : gc.value ? 'вкл' : 'выкл'}`,
       `🌡 ${d.dcRadiatorTemp_C ?? '—'} / ${d.acRadiatorTemp_C ?? '—'} °C`,
