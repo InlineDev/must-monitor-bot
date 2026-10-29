@@ -1,0 +1,10 @@
+services:
+  must:
+    build: .
+    container_name: must-dashboard
+    restart: unless-stopped
+    # host-сеть: контейнер видит реальный IP логгера (нужно для ALLOW) и слушает порты хоста напрямую
+    network_mode: host
+    env_file: .env
+    volumes:
+      - ./data:/app/data
