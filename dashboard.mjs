@@ -8,9 +8,12 @@
 // Любой флаг можно задать переменной окружения: --allow → ALLOW, --http → HTTP_PORT и т.д. (см. ниже).
 // Управление инвертором включается PIN-кодом: --control-pin 1234 (или CONTROL_PIN). Без PIN — только просмотр.
 // Telegram-бот: --telegram-token <токен от @BotFather> (или TELEGRAM_TOKEN).
+// Все настройки можно положить в .env рядом со скриптом (см. .env.example) — он подхватывается сам.
+// Веб-версия: WEB_ENABLED=true|false (или флаги --web / --no-web).
 import http from 'node:http';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from './must-eybond.mjs';
@@ -18,11 +21,35 @@ import { startTelegram } from './telegram.mjs';
 import { CONTROLS, CONTROL_RANGES, describe, getControl, toRaw, toDisplay, formatValue } from './controls.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
+
+// ---------- .env ----------
+// Подхватываем .env рядом со скриптом (или путь из ENV_FILE). Переменные, уже заданные
+// в окружении, не перезаписываются; флаги командной строки важнее всего.
+function loadEnv(file) {
+  let text;
+  try { text = fs.readFileSync(file, 'utf8'); } catch { return false; }
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line || line.startsWith('#')) continue;
+    const m = line.match(/^(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+    if (!m) continue;
+    let v = m[2];
+    if (/^(['"]).*\1$/.test(v)) v = v.slice(1, -1);       // "значение" или 'значение'
+    else v = v.replace(/\s+#.*$/, '');                     // комментарий в конце строки
+    if (process.env[m[1]] === undefined) process.env[m[1]] = v;
+  }
+  return true;
+}
+const ENV_FILE = process.env.ENV_FILE || path.join(DIR, '.env');
+const envLoaded = loadEnv(ENV_FILE);
+
 const DATA_DIR = path.join(DIR, 'data');
 const HISTORY_MS = 48 * 3600 * 1000;
 
 const argv = process.argv.slice(2);
-const BOOL = new Set(['--no-announce']);
+const BOOL = new Set(['--no-announce', '--no-web', '--web']);
+const isTrue = (v) => /^(1|true|yes|on|да)$/i.test(String(v ?? '').trim());
+const isFalse = (v) => /^(0|false|no|off|нет)$/i.test(String(v ?? '').trim());
 const opt = (n, env, d) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : process.env[env] ?? d; };
 const positional = argv.filter((a, i) => !a.startsWith('--') && !(argv[i - 1]?.startsWith('--') && !BOOL.has(argv[i - 1])));
 const noAnnounce = argv.includes('--no-announce') || process.env.NO_ANNOUNCE === '1';
@@ -32,15 +59,19 @@ if (!loggerIp && !noAnnounce) {
     '       node dashboard.mjs --no-announce --allow <IP_дома>   (сервер в интернете)');
   process.exit(2);
 }
+// Веб-версия: по умолчанию включена; WEB_ENABLED=false (или --no-web) — только опрос + Telegram-бот
+const WEB_ENABLED = argv.includes('--no-web') ? false : argv.includes('--web') ? true : !isFalse(process.env.WEB_ENABLED);
 const interval = Number(opt('interval', 'INTERVAL', 15));
 const httpPort = Number(opt('http', 'HTTP_PORT', 3000));
 const httpHost = opt('http-host', 'HTTP_HOST', '0.0.0.0');
 const allowIps = (opt('allow', 'ALLOW', '') || '').split(',').map((x) => x.trim()).filter(Boolean);
 const AUTH_USER = process.env.DASH_USER, AUTH_PASS = process.env.DASH_PASS;
-if (noAnnounce && !AUTH_PASS) console.error('ВНИМАНИЕ: дашборд без пароля. Задайте DASH_USER и DASH_PASS.');
+if (envLoaded) console.error(`настройки: ${path.basename(ENV_FILE)}`);
+if (noAnnounce && WEB_ENABLED && !AUTH_PASS) console.error('ВНИМАНИЕ: дашборд без пароля. Задайте DASH_USER и DASH_PASS.');
 const CONTROL_PIN = opt('control-pin', 'CONTROL_PIN', '') || '';
 if (CONTROL_PIN && CONTROL_PIN.length < 4) { console.error('PIN должен быть не короче 4 символов'); process.exit(2); }
-console.error(CONTROL_PIN ? 'управление: включено (по PIN)' : 'управление: выключено (запустите с --control-pin, чтобы включить)');
+if (WEB_ENABLED) console.error(CONTROL_PIN ? 'управление в вебе: включено (по PIN)' : 'управление в вебе: выключено (задайте CONTROL_PIN, чтобы включить)');
+else console.error('веб-версия: выключена (WEB_ENABLED=false)');
 if (noAnnounce && !allowIps.length) console.error('ВНИМАНИЕ: --allow не задан — порт логгера примет подключение с любого IP.');
 
 // ---------- история ----------
@@ -263,19 +294,39 @@ const server = http.createServer((req, res) => {
   }
   res.writeHead(404).end('not found');
 });
-server.listen(httpPort, httpHost, () => console.error(`дашборд: http://${httpHost === '0.0.0.0' ? 'localhost' : httpHost}:${httpPort}${AUTH_PASS ? ' (с паролем)' : ''}`));
+function lanUrls() {
+  const out = [];
+  for (const [name, list] of Object.entries(os.networkInterfaces())) {
+    for (const i of list || []) {
+      if (i.family !== 'IPv4' || i.internal) continue;
+      const tag = i.address.startsWith('100.') && /tailscale|tun/i.test(name) ? 'Tailscale' : /^(10|172\.(1[6-9]|2\d|3[01])|192\.168)\./.test(i.address) ? 'Сеть' : name;
+      out.push({ tag, url: `http://${i.address}:${httpPort}` });
+    }
+  }
+  return out;
+}
+if (WEB_ENABLED) server.listen(httpPort, httpHost, () => {
+  const lines = [`дашборд${AUTH_PASS ? ' (с паролем)' : ''}:`];
+  if (httpHost === '0.0.0.0') {
+    lines.push(`  ➜ Локально:  http://localhost:${httpPort}`);
+    for (const u of lanUrls()) lines.push(`  ➜ ${(u.tag + ':').padEnd(10)} ${u.url}`);
+  } else lines.push(`  ➜ http://${httpHost}:${httpPort}`);
+  console.error(lines.join('\n'));
+});
 
 // ---------- опрос ----------
 const ac = new AbortController();
 
 // ---------- Telegram ----------
 const TG_TOKEN = opt('telegram-token', 'TELEGRAM_TOKEN', '');
+if (!WEB_ENABLED && !TG_TOKEN) console.error('ВНИМАНИЕ: веб выключен и токен Telegram не задан — данные будут только в журнале.');
+else if (!TG_TOKEN) console.error('telegram: выключен (задайте TELEGRAM_TOKEN, чтобы включить)');
 var bot = TG_TOKEN ? startTelegram({
   token: TG_TOKEN, dataDir: DATA_DIR, signal: ac.signal, log: onLog,
   getLatest: () => latest, getStatus: () => status, getHistory: () => history,
   getControls: () => controlsPayload(), applyControl,
 }) : null;
-for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { ac.abort(); server.close(); setTimeout(() => process.exit(0), 300); });
+for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { ac.abort(); if (WEB_ENABLED) server.close(); setTimeout(() => process.exit(0), 300); });
 
 (async function loop() {
   while (!ac.signal.aborted) {

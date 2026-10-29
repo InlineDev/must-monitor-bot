@@ -27,40 +27,80 @@
 ```bash
 git clone https://github.com/InlineDev/must-monitor-bot.git
 cd must-monitor-bot
-node dashboard.mjs <IP_стика>
+cp .env.example .env && nano .env      # как минимум LOGGER_IP
+node dashboard.mjs
 ```
 
-Откройте `http://localhost:3000`. IP стика можно найти в списке клиентов роутера (имя обычно похоже на PN с наклейки, `E5000…`). На macOS разрешите входящие подключения для `node`, если система спросит.
+При запуске в консоли появятся адреса веб‑версии — открывайте любой:
 
-Полезные флаги:
+```
+дашборд (с паролем):
+  ➜ Локально:  http://localhost:3000
+  ➜ Сеть:      http://192.168.0.173:3000
+```
 
-| Флаг | Переменная окружения | Что делает |
-|---|---|---|
-| `--control-pin 4821` | `CONTROL_PIN` | Включает раздел «Управление» (без PIN — только просмотр) |
-| `--telegram-token <токен>` | `TELEGRAM_TOKEN` | Включает Telegram‑бота |
-| `--interval 15` | `INTERVAL` | Период опроса, с |
-| `--http 3000` | `HTTP_PORT` | Порт веб‑дашборда |
-| `--host <IP>` | `HOST` | IP этого компьютера, если определился неверно |
-| `--slave 4` | `SLAVE` | Modbus slave id инвертора |
-| — | `DASH_USER`, `DASH_PASS` | Логин/пароль на дашборд (Basic Auth) |
+Адрес «Сеть» открывается с любого устройства в том же Wi‑Fi. IP стика можно найти в списке клиентов роутера (имя обычно похоже на PN с наклейки, `E5000…`). На macOS разрешите входящие подключения для `node`, если система спросит.
+
+## Настройки (`.env`)
+
+Все настройки — в файле `.env` рядом с `dashboard.mjs`; он подхватывается автоматически и не попадает в git. Шаблон — [`.env.example`](.env.example). Флаги командной строки важнее `.env`.
+
+| Переменная | Флаг | По умолчанию | Что делает |
+|---|---|---|---|
+| `LOGGER_IP` | первый аргумент | — | IP стика EyeBond в домашней сети |
+| `WEB_ENABLED` | `--web` / `--no-web` | `true` | Веб‑дашборд. `false` — только опрос и Telegram‑бот |
+| `HTTP_PORT` | `--http` | `3000` | Порт веб‑дашборда |
+| `HTTP_HOST` | `--http-host` | `0.0.0.0` | `127.0.0.1` — веб только с этого устройства |
+| `DASH_USER`, `DASH_PASS` | — | `admin`, пусто | Логин/пароль на веб (Basic Auth) |
+| `CONTROL_PIN` | `--control-pin` | пусто | PIN раздела «Управление» в вебе; пусто — только просмотр |
+| `TELEGRAM_TOKEN` | `--telegram-token` | пусто | Токен от @BotFather; пусто — бот выключен |
+| `TG_BAT_LOW` | — | авто | Порог уведомления «батарея садится», В |
+| `INTERVAL` | `--interval` | `15` | Период опроса, с |
+| `SLAVE` | `--slave` | `4` | Modbus slave id инвертора |
+| `HOST` | `--host` | авто | IP этого устройства, если определился неверно |
+| `ENV_FILE` | — | `./.env` | Путь к другому файлу настроек |
+
+Примеры:
+- **только бот** (без сайта): `WEB_ENABLED=false`, `TELEGRAM_TOKEN=…`;
+- **бот + сайт в домашней сети**: `WEB_ENABLED=true`, `DASH_PASS=…`, `CONTROL_PIN=…`, `TELEGRAM_TOKEN=…`.
 
 Разовое чтение в консоль без дашборда: `node must-eybond.mjs <IP_стика> [--json] [--debug]`.
 
-## Android‑телефон (Termux)
+## Android‑телефон (Termux) + PM2
 
 Старый телефон на зарядке (лучше — от выхода инвертора, вместе с роутером) — бесплатный круглосуточный сервер.
 
-1. Установите **Termux из F‑Droid** (версия в Google Play устарела).
-2. ```bash
-   pkg install -y nodejs git
-   git clone https://github.com/InlineDev/must-monitor-bot.git ~/must
-   cd ~/must
-   echo 'ТОКЕН_ОТ_BOTFATHER' > .tgtoken && chmod 600 .tgtoken   # если нужен бот
-   LOGGER_IP=<IP_стика> bash start.sh
+1. Установите **Termux** и **Termux:Boot** из **F‑Droid** (версии в Google Play устарели). Откройте Termux:Boot один раз.
+2. Установка:
+   ```bash
+   pkg update -y && pkg install -y nodejs git
+   npm install -g pm2
+   git clone https://github.com/InlineDev/must-monitor-bot.git ~/must-monitor-bot
+   cd ~/must-monitor-bot
+   cp .env.example .env && nano .env && chmod 600 .env
    ```
-3. В настройках Android снимите ограничения батареи для Termux.
+3. Запуск:
+   ```bash
+   pm2 start dashboard.mjs --name must
+   pm2 save
+   termux-wake-lock
+   pm2 logs must --lines 30 --nostream      # адреса веба и код привязки Telegram
+   ```
+4. Автозапуск после перезагрузки телефона:
+   ```bash
+   mkdir -p ~/.termux/boot
+   printf '#!/data/data/com.termux/files/usr/bin/sh\ntermux-wake-lock\npm2 resurrect\n' > ~/.termux/boot/start-must.sh
+   chmod +x ~/.termux/boot/start-must.sh
+   ```
+5. В настройках Android снимите ограничения батареи для Termux.
 
-Скрипт сам сгенерирует пароль на дашборд и PIN управления (`.dashpass`, `.controlpin`) и покажет код для привязки Telegram. С `TUNNEL=1` дополнительно поднимет временную публичную ссылку `trycloudflare.com` и выведет на неё QR‑код (нужны `pkg install cloudflared libqrencode`).
+| Что | Команда |
+|---|---|
+| Статус / логи | `pm2 status` / `pm2 logs must` |
+| Применить изменения `.env` | `pm2 restart must` |
+| Обновиться с GitHub | `cd ~/must-monitor-bot && git pull && pm2 restart must` |
+
+Без PM2 можно запустить одной командой `LOGGER_IP=<IP_стика> bash start.sh`: скрипт сам сгенерирует пароль на веб и PIN (`.dashpass`, `.controlpin`), включит бота, если есть файл `.tgtoken`, а с `TUNNEL=1` поднимет временную ссылку `trycloudflare.com` с QR‑кодом (нужны `pkg install cloudflared libqrencode`).
 
 ## Telegram‑бот
 
@@ -129,7 +169,8 @@ node announce.mjs <IP_стика> <IP_сервера>
 | `controls.mjs` | Белый список настроек и проверки |
 | `solarman.mjs` | Клиент Solarman V5 (для стиков Solarman, порт 8899) |
 | `announce.mjs` | Перенаправить стик на указанный сервер |
-| `start.sh` | Запуск на Android (Termux) одной командой |
+| `start.sh` | Запуск на Android (Termux) одной командой без PM2 |
+| `.env.example` | Шаблон настроек |
 | `server/` | Версия для VPS: Dockerfile, docker-compose, `.env.example` |
 
 Данные хранятся в `data/` (история за 48 ч, журнал изменений, привязанные чаты Telegram) — папка в `.gitignore`, в репозиторий не попадает.

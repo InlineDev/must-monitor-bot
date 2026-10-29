@@ -10,6 +10,7 @@
 # Нужно один раз: pkg install -y nodejs   (для TUNNEL=1 ещё: cloudflared libqrencode)
 
 cd "$(dirname "$0")" || exit 1
+LOGGER_IP="${LOGGER_IP:-$(sed -n 's/^LOGGER_IP=//p' .env 2>/dev/null | tr -d '"\r' | head -n1)}"
 LOGGER_IP="${LOGGER_IP:-$(cat .loggerip 2>/dev/null)}"
 [ -n "$LOGGER_IP" ] || { echo "Укажите IP стика: LOGGER_IP=192.168.0.x bash start.sh  (запомнится в .loggerip)"; exit 2; }
 echo "$LOGGER_IP" > .loggerip
