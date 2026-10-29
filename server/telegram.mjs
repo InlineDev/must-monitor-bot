@@ -371,7 +371,10 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   }
 
   // ---------- уведомления ----------
-  const alert = { grid: null, gridSince: null, gridPending: 0, batLow: false, errors: '', stale: false, lastData: Date.now() };
+  // «Есть ли сеть и с какого момента» сохраняем в data/telegram.json: после перезапуска бота
+  // длительность отключения считается от его настоящего начала.
+  const alert = { grid: state.grid?.on ?? null, gridSince: state.grid?.since ?? null, gridPending: 0, batLow: false, errors: '', stale: false, lastData: Date.now() };
+  const saveGrid = () => { state.grid = { on: alert.grid, since: alert.gridSince }; save(); };
   alertRef = alert;
   // Уведомления не теряются: если Telegram недоступен (например, пока после переключения на батарею
   // поднимается интернет), повторяем каждые 30 с до 24 ч. Если ушло с задержкой — указываем время события.
@@ -408,11 +411,11 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     if (alert.stale) { alert.stale = false; notify('🟢 Связь с инвертором восстановлена'); }
     // сеть: 2 замера подряд, чтобы не дёргаться на провалах
     const gridOn = (d.gridVoltage_V ?? 0) > 170;
-    if (alert.grid === null) { alert.grid = gridOn; alert.gridSince = d.ts; }
+    if (alert.grid === null) { alert.grid = gridOn; alert.gridSince = d.ts; saveGrid(); }
     else if (gridOn !== alert.grid) {
       if (++alert.gridPending >= 2) {
         const was = alert.gridSince;
-        alert.grid = gridOn; alert.gridSince = d.ts; alert.gridPending = 0;
+        alert.grid = gridOn; alert.gridSince = d.ts; alert.gridPending = 0; saveGrid();
         if (gridOn) { state.outages.push({ from: was, to: d.ts }); state.outages = state.outages.filter((o) => o.to > Date.now() - 7 * 86400e3); save(); }
         notify(gridOn
           ? `🟢 <b>Сеть вернулась</b> в ${hm(d.ts)}. Без сети: ${dur(d.ts - was)}.`
