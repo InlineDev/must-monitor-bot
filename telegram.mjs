@@ -14,6 +14,29 @@ const BAT_CHARGE_SIGN = -1;
 // MUST меряет мощность батареи грубо: около нуля значение «гуляет» на десятки ватт.
 // Меньше BAT_NOISE_W — «покой»; «заряд» при выключенном заряде от сети и без солнца — тоже «покой».
 const BAT_NOISE_W = 50;
+// Ток батареи считаем из мощности и напряжения: регистр тока у MUST целочисленный (шаг 1 А), а так точнее.
+export const batteryAmps = (w, v) => (v > 0 ? Math.abs(w) / v : null);
+const fmtA = (a) => (a == null ? '—' : a.toFixed(1).replace('.', ','));
+// Стадия заряда по напряжению относительно настроек absorption/float:
+//   заряд — напряжение ниже порогов; дозаряд — у absorption, ток падает; поддержка — у float, ток малый.
+export function batteryStage(bat, v, { absorptionV, floatV, gridChargeOn } = {}) {
+  if (bat < 0) return 'разряд';
+  const a = batteryAmps(bat, v) ?? 0;
+  if (bat > 0) {
+    if (absorptionV && v >= absorptionV - 0.15) return 'дозаряд';
+    if (floatV && Math.abs(v - floatV) <= 0.15 && a < 5) return 'поддержка';
+    return 'заряд';
+  }
+  // ток около нуля: если заряд от сети включён и батарея на уровне float — она полная и на поддержке
+  if (gridChargeOn && floatV && v >= floatV - 0.3) return 'поддержка';
+  return 'покой';
+}
+export function batteryLine(bat, v, opts) {
+  const head = `${n1(v)} В`;
+  const stage = batteryStage(bat, v, opts);
+  if (!bat) return `${head} · ${stage === 'поддержка' ? 'полная, поддержка' : stage}`;
+  return `${head} · ${stage} ${fmtA(batteryAmps(bat, v))} А · ${fmtW(Math.abs(bat))}`;
+}
 export function batteryFlow(w, gridChargeOn, pvW) {
   if (w == null || Math.abs(w) < BAT_NOISE_W) return 0;
   if (w > 0 && gridChargeOn === 0 && !((pvW ?? 0) > BAT_NOISE_W)) return 0;
@@ -109,10 +132,16 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     const d = getLatest(), st = getStatus();
     if (!d) return '⏳ Данных от инвертора пока нет — жду подключения логгера.';
     const age = Date.now() - d.ts;
-    const grid = (d.gridPower_W ?? 0) * GRID_IMPORT_SIGN;
     const gcItem = getControls().items.find((i) => i.key === 'gridCharge');
     const bat = batteryFlow((d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN, gcItem?.value, d.pvPower_W);
     const gridOn = (d.gridVoltage_V ?? 0) > 170;
+    // Регистр мощности сети в байпасе не учитывает зарядку: панелей нет, значит заряд идёт из сети.
+    // Показываем не меньше «нагрузка + заряд», с пометкой «≈», если пришлось оценить.
+    const gridReported = (d.gridPower_W ?? 0) * GRID_IMPORT_SIGN;
+    const fromGrid = gridOn && ['ByPass', 'Grid charging'].includes(d.workState) && bat >= 0; // нагрузка и заряд идут из сети
+    const gridNeed = fromGrid ? Math.max(0, (d.loadPower_W ?? 0) + bat) : 0;
+    const gridEst = fromGrid && gridNeed > gridReported + 30;
+    const grid = gridEst ? gridNeed : gridReported;
     const ctl = getControls();
     const gc = ctl.items.find((i) => i.key === 'gridCharge');
     const errs = [d.inverterErrors, (d.chargerErrors || '').split(', ').filter((x) => x && x !== 'OK' && x !== 'PV voltage is too low').join(', '), d.inverterWarnings]
@@ -120,8 +149,8 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     return [
       `<b>MUST</b> · ${esc(MODE_RU[d.workState] || d.workState)}`,
       '',
-      `${gridOn ? '🟢' : '🔴'} <b>Сеть:</b> ${gridOn ? `${n1(d.gridVoltage_V)} В · ${(d.gridFrequency_Hz ?? 0).toFixed(2).replace('.', ',')} Гц${Math.abs(grid) > 5 ? ` · ${grid > 0 ? 'берём' : 'отдаём'} ${fmtW(Math.abs(grid))}` : ''}` : 'нет напряжения'}`,
-      `🔋 <b>Батарея:</b> ${n1(d.inverterBatteryVoltage_V)} В · ${bat > 0 ? `заряд ${fmtW(bat)}` : bat < 0 ? `разряд ${fmtW(-bat)}` : 'покой'}`,
+      `${gridOn ? '🟢' : '🔴'} <b>Сеть:</b> ${gridOn ? `${n1(d.gridVoltage_V)} В · ${(d.gridFrequency_Hz ?? 0).toFixed(2).replace('.', ',')} Гц${Math.abs(grid) > 5 ? ` · ${grid > 0 ? 'берём' : 'отдаём'} ${gridEst ? '≈' : ''}${fmtW(Math.abs(grid))}` : ''}` : 'нет напряжения'}`,
+      `🔋 <b>Батарея:</b> ${batteryLine(bat, d.inverterBatteryVoltage_V, stageOpts())}`,
       `🏠 <b>Нагрузка:</b> ${fmtW(d.loadPower_W)} (${d.loadPercent ?? '—'} %)`,
       `🔌 <b>Заряд от сети:</b> ${gc?.value == null ? '—' : gc.value ? 'вкл' : 'выкл'}`,
       `🌡 ${d.dcRadiatorTemp_C ?? '—'} / ${d.acRadiatorTemp_C ?? '—'} °C`,
@@ -132,6 +161,11 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   }
 
   const statusKb = () => [[{ text: '🔄 Обновить', callback_data: 'r' }]];
+  const stageOpts = () => {
+    const items = getControls().items;
+    const val = (k) => items.find((i) => i.key === k)?.value;
+    return { absorptionV: val('absorptionV'), floatV: val('floatV'), gridChargeOn: val('gridCharge') === 1 };
+  };
 
   function dayText() {
     const now = Date.now(), from = now - 24 * 3600e3;
@@ -316,7 +350,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
         if (gridOn) { state.outages.push({ from: was, to: d.ts }); state.outages = state.outages.filter((o) => o.to > Date.now() - 7 * 86400e3); save(); }
         notify(gridOn
           ? `🟢 <b>Сеть вернулась</b> в ${hm(d.ts)}. Без сети: ${dur(d.ts - was)}.\n🔋 ${n1(d.inverterBatteryVoltage_V)} В`
-          : `🔴 <b>Пропала сеть</b> в ${hm(d.ts)}. Работаем от батареи.\n🔋 ${n1(d.inverterBatteryVoltage_V)} В · нагрузка ${fmtW(d.loadPower_W)}`);
+          : `🔴 <b>Пропала сеть</b> в ${hm(d.ts)}. Работаем от батареи.\n🔋 ${batteryLine(batteryFlow((d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN, null, d.pvPower_W), d.inverterBatteryVoltage_V)}\n🏠 Нагрузка ${fmtW(d.loadPower_W)}`);
       }
     } else alert.gridPending = 0;
     // батарея: порог = «переход на сеть» + 0,5 В, иначе 23,5 В для 24-вольтовой системы

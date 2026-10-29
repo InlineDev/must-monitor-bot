@@ -383,12 +383,26 @@ function renderNow() {
   const gcOn = ctlState?.items?.find((i) => i.key === 'gridCharge')?.value;
   let bat = (d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN;
   if (Math.abs(bat) < 50 || (bat > 0 && gcOn === 0 && !((d.pvPower_W ?? 0) > 50))) bat = 0;
-  const grid = d.gridPower_W * GRID_IMPORT_SIGN;    // + из сети
+  const batA = d.inverterBatteryVoltage_V > 0 ? Math.abs(bat) / d.inverterBatteryVoltage_V : 0;
+  // стадия: заряд / дозаряд (у absorption) / поддержка (у float, малый ток) — та же логика, что в боте
+  const cv = (k) => ctlState?.items?.find((i) => i.key === k)?.value;
+  const absV = cv('absorptionV'), flV = cv('floatV'), vb = d.inverterBatteryVoltage_V ?? 0;
+  const stage = bat < 0 ? 'разряд' : bat > 0
+    ? (absV && vb >= absV - 0.15 ? 'дозаряд' : flV && Math.abs(vb - flV) <= 0.15 && batA < 5 ? 'поддержка' : 'заряд')
+    : (gcOn === 1 && flV && vb >= flV - 0.3 ? 'поддержка' : 'покой');
+  // Регистр мощности сети в байпасе не учитывает зарядку батареи. Панелей нет, значит заряд идёт из сети:
+  // берём из сети не меньше, чем «нагрузка + заряд». Если пришлось оценить — помечаем «≈».
+  const gridReported = (d.gridPower_W ?? 0) * GRID_IMPORT_SIGN;
+  const gridOnline = (d.gridVoltage_V ?? 0) > 170;
+  const fromGrid = gridOnline && ['ByPass', 'Grid charging'].includes(d.workState) && bat >= 0; // нагрузка и заряд идут из сети
+  const gridNeed = fromGrid ? Math.max(0, (load ?? 0) + bat) : 0;
+  const gridEst = fromGrid && gridNeed > gridReported + 30;
+  const grid = gridEst ? gridNeed : gridReported;    // + из сети
   const mode = MODE_RU[d.workState] || d.workState;
 
   $('f-mode').textContent = mode;
-  $('f-grid').textContent = fmtW(Math.abs(grid)); $('f-grid-s').textContent = `${fmt(d.gridVoltage_V)} В · ${fmt(d.gridFrequency_Hz, 2)} Гц`;
-  $('f-bat').textContent = fmtW(Math.abs(bat));   $('f-bat-s').textContent = `${fmt(d.inverterBatteryVoltage_V)} В · ${bat > 0 ? 'заряд' : bat < 0 ? 'разряд' : 'покой'}`;
+  $('f-grid').textContent = (gridEst ? '≈ ' : '') + fmtW(Math.abs(grid)); $('f-grid-s').textContent = `${fmt(d.gridVoltage_V)} В · ${fmt(d.gridFrequency_Hz, 2)} Гц`;
+  $('f-bat').textContent = fmtW(Math.abs(bat));   $('f-bat-s').textContent = `${fmt(d.inverterBatteryVoltage_V)} В · ${stage}`;
   $('f-load').textContent = fmtW(load); $('f-load-s').textContent = `${d.loadPercent ?? '—'} % · ${fmt(d.inverterVoltage_V)} В`;
 
   const live = (id, w, reverse) => { const el = $(id); el.classList.toggle('on', Math.abs(w) > 5); el.classList.toggle('rev', !!reverse); };
@@ -401,8 +415,8 @@ function renderNow() {
   $('k-load').innerHTML = splitUnit(fmtW(load));
   $('k-load-d').textContent = `${d.loadPercent ?? '—'} % от номинала · ${fmt(d.loadCurrent_A)} А`;
   $('k-bat').innerHTML = `${fmt(d.inverterBatteryVoltage_V)}<small>В</small>`;
-  $('k-bat-d').textContent = bat ? `${bat > 0 ? 'заряд' : 'разряд'} ${fmtW(Math.abs(bat))} · ${Math.abs(d.batteryCurrent_A ?? 0)} А` : 'покой';
-  $('k-grid').innerHTML = splitUnit(fmtW(Math.abs(grid)));
+  $('k-bat-d').textContent = bat ? `${stage} ${fmt(batA)} А · ${fmtW(Math.abs(bat))}` : (stage === 'поддержка' ? 'полная, поддержка' : 'покой');
+  $('k-grid').innerHTML = (gridEst ? '≈ ' : '') + splitUnit(fmtW(Math.abs(grid)));
   $('k-grid-d').textContent = `${grid > 5 ? 'из сети' : grid < -5 ? 'в сеть' : 'нет обмена'} · ${fmt(d.gridVoltage_V)} В`;
 
   const al = [];
@@ -423,8 +437,8 @@ function renderNow() {
     ['Ток нагрузки', `${fmt(d.loadCurrent_A)} А`], ['Шина DC', `${fmt(d.busVoltage_V)} В`],
   ]);
   $('d-pv').innerHTML = kv([
-    ['Напряжение', `${fmt(d.inverterBatteryVoltage_V)} В`], ['Ток', `${d.batteryCurrent_A ?? '—'} А`],
-    ['Мощность', bat ? `${bat > 0 ? '+' : ''}${fmtW(bat)}` : '0 Вт'], ['Состояние', bat > 0 ? 'заряд' : bat < 0 ? 'разряд' : 'покой'],
+    ['Напряжение', `${fmt(d.inverterBatteryVoltage_V)} В`], ['Ток', bat ? `${fmt(batA)} А` : '0 А'],
+    ['Мощность', bat ? `${bat > 0 ? '+' : ''}${fmtW(bat)}` : '0 Вт'], ['Состояние', stage],
     ['Заряжено всего', `${fmt(d.accChargerEnergy_kWh)} кВт·ч`], ['Разряжено всего', `${fmt(d.accDischargerEnergy_kWh)} кВт·ч`],
   ]);
   $('d-temp').innerHTML = kv([
