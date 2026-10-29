@@ -28,7 +28,11 @@ export const CONTROLS = [
   },
   {
     key: 'gridChargeCurrent', address: 20125, type: 'number', group: 'Заряд',
-    label: 'Ток заряда от сети', unit: 'А', coeff: 0.1, range: () => ({ min: 20, max: 30, step: 10 }),
+    label: 'Ток заряда от сети', unit: 'А', coeff: 0.1,
+    // PH18-3024 PRO: максимум 60 А по паспорту (в ha-must-inverter было 20–30 А для другой модели).
+    // Инвертор сам ограничивает значение — после записи оно читается обратно и проверяется.
+    range: () => ({ min: 10, max: 60, step: 10 }),
+    hint: 'Ток, которым инвертор заряжает батарею от сети. Не выше, чем допускает ваша батарея (смотрите паспорт АКБ).',
   },
   {
     key: 'maxChargeCurrent', address: 20132, type: 'number', group: 'Заряд',
