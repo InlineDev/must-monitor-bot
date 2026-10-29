@@ -389,7 +389,7 @@ function renderNow() {
   const absV = cv('absorptionV'), flV = cv('floatV'), vb = d.inverterBatteryVoltage_V ?? 0;
   const stage = bat < 0 ? 'разряд' : bat > 0
     ? (absV && vb >= absV - 0.15 ? 'дозаряд' : flV && Math.abs(vb - flV) <= 0.15 && batA < 5 ? 'поддержка' : 'заряд')
-    : (gcOn === 1 && flV && vb >= flV - 0.3 ? 'поддержка' : 'покой');
+    : (gcOn === 1 && (d.gridVoltage_V ?? 0) > 170 && flV && vb >= flV - 0.3 ? 'поддержка' : 'покой');
   // Регистр мощности сети в байпасе не учитывает зарядку батареи. Панелей нет, значит заряд идёт из сети:
   // берём из сети не меньше, чем «нагрузка + заряд». Если пришлось оценить — помечаем «≈».
   const gridReported = (d.gridPower_W ?? 0) * GRID_IMPORT_SIGN;

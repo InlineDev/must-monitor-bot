@@ -69,7 +69,9 @@ const BTN = {
   absorptionV: 'Заряд (absorption)', floatV: 'Поддержка (float)', batteryAh: 'Ёмкость батареи',
 };
 
-export function startTelegram({ token, dataDir, getLatest, getStatus, getControls, getHistory, applyControl, log, signal }) {
+export function startTelegram({ token, dataDir, getLatest, getStatus, getControls, getHistory, applyControl, log: logInternal, signal }) {
+  // пишем и во внутренний журнал, и в консоль (видно в pm2 logs)
+  const log = (m) => { console.error(`${new Date().toISOString().slice(11, 19)} ${m}`); logInternal?.(m); };
   const API = (process.env.TELEGRAM_API || 'https://api.telegram.org') + '/bot' + token;
   const stateFile = path.join(dataDir, 'telegram.json');
   let state = { chats: [], muted: [], offset: 0, outages: [] };
@@ -167,7 +169,8 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   const stageOpts = () => {
     const items = getControls().items;
     const val = (k) => items.find((i) => i.key === k)?.value;
-    return { absorptionV: val('absorptionV'), floatV: val('floatV'), gridChargeOn: val('gridCharge') === 1 };
+    const d = getLatest();
+    return { absorptionV: val('absorptionV'), floatV: val('floatV'), gridChargeOn: val('gridCharge') === 1 && (d?.gridVoltage_V ?? 0) > 170 };
   };
 
   function dayText() {
@@ -338,7 +341,36 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   // ---------- уведомления ----------
   const alert = { grid: null, gridSince: null, gridPending: 0, batLow: false, errors: '', stale: false, lastData: Date.now() };
   alertRef = alert;
-  const notify = (text) => { for (const c of state.chats) if (!state.muted.includes(c)) send(c, text); };
+  // Уведомления не теряются: если Telegram недоступен (например, пока после переключения на батарею
+  // поднимается интернет), повторяем каждые 30 с до 24 ч. Если ушло с задержкой — указываем время события.
+  state.outbox ||= [];
+  let flushing = false;
+  async function flushOutbox() {
+    if (flushing) return;
+    flushing = true;
+    try {
+      while (state.outbox.length) {
+        const it = state.outbox[0];
+        if (Date.now() - it.ts > 24 * 3600e3 || !state.chats.includes(it.chat)) { state.outbox.shift(); save(); continue; }
+        const late = Date.now() - it.ts > 60000 ? `\n\n<i>⏱ Событие в ${hm(it.ts)}, сообщение задержалось: не было связи с Telegram.</i>` : '';
+        try {
+          await call('sendMessage', { chat_id: it.chat, text: it.text + late, parse_mode: 'HTML', disable_web_page_preview: true });
+          state.outbox.shift(); save();
+        } catch (e) {
+          log(`telegram: уведомление не отправлено (${e.message}) — повтор через 30 с`);
+          if (/chat not found|blocked|Forbidden|deactivated|can't parse/i.test(e.message)) { state.outbox.shift(); save(); continue; }
+          break;
+        }
+      }
+    } finally { flushing = false; }
+  }
+  setInterval(flushOutbox, 30000).unref();
+  setTimeout(flushOutbox, 3000).unref(); // после перезапуска досылаем то, что не успели
+  const notify = (text) => {
+    const ts = Date.now();
+    for (const c of state.chats) if (!state.muted.includes(c)) state.outbox.push({ chat: c, text, ts });
+    save(); flushOutbox();
+  };
 
   function onData(d) {
     alert.lastData = d.ts;
