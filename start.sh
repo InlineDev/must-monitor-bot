@@ -58,7 +58,7 @@ if [ "$TUNNEL" != "1" ]; then
   echo " Дашборд: http://localhost:$HTTP_PORT"
   echo " Логин: $DASH_USER   Пароль: $DASH_PASS   PIN управления: $CONTROL_PIN"
   if [ ${#TG_ARGS[@]} -gt 0 ]; then
-    sleep 2; grep -o 'отправьте боту:.*' dashboard.log | head -n1 | sed 's/^/ Telegram: /'
+    sleep 2; grep -m1 '^telegram:' dashboard.log | sed 's/^telegram:/ Telegram:/'
   else
     echo " Telegram-бот выключен (положите токен в файл .tgtoken)"
   fi
