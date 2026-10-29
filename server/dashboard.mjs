@@ -62,6 +62,11 @@ if (!loggerIp && !noAnnounce) {
 // Веб-версия: по умолчанию включена; WEB_ENABLED=false (или --no-web) — только опрос + Telegram-бот
 const WEB_ENABLED = argv.includes('--no-web') ? false : argv.includes('--web') ? true : !isFalse(process.env.WEB_ENABLED);
 const interval = Number(opt('interval', 'INTERVAL', 15));
+// Знаки мощностей MUST PV18 (проверено по замерам 29.10.2026):
+// батарея: отрицательное значение регистра = ЗАРЯД; сеть: отрицательное = потребление из сети.
+// Веб получает их через /api/state, бот — из telegram.mjs (те же значения).
+const BATTERY_POWER_SIGN = -1;
+const GRID_POWER_SIGN = -1;
 const httpPort = Number(opt('http', 'HTTP_PORT', 3000));
 const httpHost = opt('http-host', 'HTTP_HOST', '0.0.0.0');
 const allowIps = (opt('allow', 'ALLOW', '') || '').split(',').map((x) => x.trim()).filter(Boolean);
@@ -269,7 +274,7 @@ const server = http.createServer((req, res) => {
   if (url.pathname === '/api/state') {
     const since = Number(url.searchParams.get('since') || 0);
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end(JSON.stringify({ latest, status, logs: logs.slice(-30), history: history.filter((p) => p.ts >= since) }));
+    res.end(JSON.stringify({ latest, status, config: { batterySign: BATTERY_POWER_SIGN, gridSign: GRID_POWER_SIGN }, logs: logs.slice(-30), history: history.filter((p) => p.ts >= since) }));
     return;
   }
   if (url.pathname === '/events') {

@@ -8,9 +8,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
-// Знаки мощностей — как в dashboard.html (по замерам на этом инверторе).
+// Знаки мощностей MUST PV18 — те же, что в dashboard.mjs. После умножения: батарея > 0 — заряд, сеть > 0 — из сети.
 const GRID_IMPORT_SIGN = -1;
-const BAT_CHARGE_SIGN = 1;
+const BAT_CHARGE_SIGN = -1;
 
 const MODE_RU = { PowerOn: 'Включение', SelfTest: 'Самотест', OffGrid: 'Автономно (от батареи)', 'Grid-Tie': 'С сетью', ByPass: 'Байпас (от сети)', Stop: 'Стоп', 'Grid charging': 'Заряд от сети' };
 const esc = (s) => String(s ?? '').replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -21,10 +21,19 @@ const hms = (t) => new Date(t).toLocaleTimeString('ru-RU', { timeZone: process.e
 const dur = (ms) => { if (ms < 60000) return `${Math.max(1, Math.round(ms / 1000))} с`; const m = Math.round(ms / 60000); return m < 60 ? `${m} мин` : `${Math.floor(m / 60)} ч ${m % 60} мин`; };
 
 // Какие настройки показываем кнопками (ключи из controls.mjs)
+// gridCharge — одна кнопка-переключатель, energyMode — выбор, numeric — ввод числа сообщением
 const QUICK = {
-  gridCharge: [{ v: 1, t: 'Включить' }, { v: 0, t: 'Выключить' }],
-  energyMode: [{ v: 3, t: 'UTI' }, { v: 1, t: 'SBU' }],
-  gridChargeCurrent: [{ v: 20, t: '20 А' }, { v: 30, t: '30 А' }],
+  gridCharge: 'toggle',
+  gridChargeCurrent: 'number',
+  stopDischargeV: 'number',
+  stopChargeV: 'number',
+  absorptionV: 'number',
+  floatV: 'number',
+};
+// Короткие подписи для кнопок (полные названия — в тексте раздела)
+const BTN = {
+  gridChargeCurrent: 'Ток заряда', stopDischargeV: 'Переход на сеть', stopChargeV: 'Возврат на батарею',
+  absorptionV: 'Заряд (absorption)', floatV: 'Поддержка (float)',
 };
 
 export function startTelegram({ token, dataDir, getLatest, getStatus, getControls, getHistory, applyControl, log, signal }) {
@@ -32,14 +41,33 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   const stateFile = path.join(dataDir, 'telegram.json');
   let state = { chats: [], muted: [], offset: 0, outages: [] };
   try { state = { ...state, ...JSON.parse(fs.readFileSync(stateFile, 'utf8')) }; } catch {}
-  const save = () => fs.writeFile(stateFile, JSON.stringify(state), { mode: 0o600 }, () => {});
+  // Атомарная запись: сначала во временный файл, потом rename — файл не побьётся при выключении телефона
+  const save = () => {
+    try {
+      fs.mkdirSync(dataDir, { recursive: true });
+      fs.writeFileSync(stateFile + '.tmp', JSON.stringify(state), { mode: 0o600 });
+      fs.renameSync(stateFile + '.tmp', stateFile);
+    } catch (e) { log(`telegram: не удалось сохранить ${stateFile}: ${e.message}`); }
+  };
 
   let alertRef = { grid: null };
-  const pairCode = String(crypto.randomInt(100000, 1000000));
-  const pairUntil = Date.now() + 30 * 60000;
-  const pairFails = new Map();
-  console.error(`telegram: бот запущен. Чтобы привязать чат, отправьте боту:  /start ${pairCode}   (код действует 30 мин)` +
-    (state.chats.length ? ` · уже привязано чатов: ${state.chats.length}` : ''));
+  // Доступ по постоянному паролю из .env (TELEGRAM_PASSWORD). Кто ввёл его один раз — запомнен в data/telegram.json.
+  // Если пароль поменяли — все чаты отвязываются, и вводить нужно новый.
+  const PASSWORD = String(process.env.TELEGRAM_PASSWORD || '');
+  const passHash = PASSWORD ? crypto.createHash('sha256').update('must-monitor-bot:' + PASSWORD).digest('hex') : null;
+  if (passHash && state.passHash && state.passHash !== passHash && state.chats.length) {
+    log(`telegram: пароль изменён — отвязано чатов: ${state.chats.length}`);
+    state.chats = []; state.muted = [];
+  }
+  if (passHash && state.passHash !== passHash) { state.passHash = passHash; save(); }
+  const passFails = new Map(); // chat -> { n, until }
+  console.error(`telegram: бот запущен · чатов с доступом: ${state.chats.length}` +
+    (PASSWORD ? ' · новые получают доступ по паролю TELEGRAM_PASSWORD' : ' · ВНИМАНИЕ: TELEGRAM_PASSWORD не задан — новые чаты подключить нельзя'));
+  const checkPassword = (text) => {
+    if (!PASSWORD) return false;
+    const a = Buffer.from(String(text)), b = Buffer.from(PASSWORD);
+    return a.length === b.length && crypto.timingSafeEqual(a, b);
+  };
 
   async function call(method, body) {
     const r = await fetch(`${API}/${method}`, {
@@ -57,9 +85,16 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   const allowed = (id) => state.chats.includes(id);
 
   // Постоянное меню внизу экрана — чтобы ничего не набирать
-  const MENU = { status: '📊 Статус', settings: '⚙️ Настройки', day: '📈 Сутки', mute: '🔔 Уведомления' };
-  const menuKb = { keyboard: [[{ text: MENU.status }, { text: MENU.settings }], [{ text: MENU.day }, { text: MENU.mute }]], resize_keyboard: true, is_persistent: true };
-  const sendMenu = (chat_id, text) => call('sendMessage', { chat_id, text, parse_mode: 'HTML', reply_markup: menuKb }).catch((e) => log(`telegram: ${e.message}`));
+  const MENU = { status: '📊 Статус', settings: '⚙️ Настройки', day: '📈 Сутки', mute: '🔔 Уведомления', muteOff: '🔕 Уведомления' };
+  const isMuted = (chat) => state.muted.includes(chat);
+  const menuKb = (chat) => ({ keyboard: [[{ text: MENU.status }, { text: MENU.settings }], [{ text: MENU.day }, { text: isMuted(chat) ? MENU.muteOff : MENU.mute }]], resize_keyboard: true, is_persistent: true });
+  const sendMenu = (chat_id, text) => call('sendMessage', { chat_id, text, parse_mode: 'HTML', reply_markup: menuKb(chat_id) }).catch((e) => log(`telegram: ${e.message}`));
+  const notifyText = (chat) => isMuted(chat)
+    ? '🔕 <b>Уведомления выключены</b>\n\nСообщения о пропадании сети, ошибках и батарее сейчас не приходят.'
+    : '🔔 <b>Уведомления включены</b>\n\nПишу, когда пропала или вернулась сеть, при ошибках инвертора, садящейся батарее и потере связи.';
+  const notifyKb = (chat) => [[isMuted(chat)
+    ? { text: '🔔 Включить уведомления', callback_data: 'n:1' }
+    : { text: '🔕 Выключить уведомления', callback_data: 'n:0' }]];
 
   // ---------- тексты ----------
   function statusText() {
@@ -86,15 +121,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     ].filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n');
   }
 
-  function statusKb() {
-    const ctl = getControls();
-    const kb = [[{ text: '🔄 Обновить', callback_data: 'r' }]];
-    if (!ctl.items.length) return kb;
-    const gc = ctl.items.find((i) => i.key === 'gridCharge');
-    if (gc) kb.push([{ text: gc.value ? '🔌 Выключить заряд от сети' : '🔌 Включить заряд от сети', callback_data: `c:gridCharge:${gc.value ? 0 : 1}` }]);
-    kb.push([{ text: '⚙️ Настройки', callback_data: 's' }]);
-    return kb;
-  }
+  const statusKb = () => [[{ text: '🔄 Обновить', callback_data: 'r' }]];
 
   function dayText() {
     const now = Date.now(), from = now - 24 * 3600e3;
@@ -123,20 +150,51 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     const ctl = getControls();
     if (!ctl.items.length) return 'Настройки ещё не прочитаны с инвертора.';
     const line = (k) => { const it = ctl.items.find((i) => i.key === k); return it ? `• ${esc(it.label)}: <b>${esc(fmt(it))}</b>` : ''; };
-    return ['<b>Настройки</b>', '', ...Object.keys(QUICK).map(line),
-      line('stopDischargeV'), line('stopChargeV'), line('absorptionV'), line('floatV'),
-      '', '<i>Пороги и напряжения меняются в веб-дашборде.</i>'].filter(Boolean).join('\n');
+    return ['<b>⚙️ Настройки</b>', '', line('energyMode'), line('gridCharge'), line('gridChargeCurrent'),
+      '', '<b>Пороги батареи</b>', line('stopDischargeV'), line('stopChargeV'), line('absorptionV'), line('floatV'),
+      '', '<i>Нажмите ✏️, чтобы изменить значение.</i>'].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n');
   }
   function settingsKb() {
     const ctl = getControls();
     const kb = [];
-    for (const [k, opts] of Object.entries(QUICK)) {
+    for (const [k, kind] of Object.entries(QUICK)) {
       const it = ctl.items.find((i) => i.key === k);
       if (!it) continue;
-      kb.push(opts.map((o) => ({ text: `${o.v === it.value ? '● ' : ''}${short(it)} ${o.t}`, callback_data: `c:${k}:${o.v}` })));
+      if (kind === 'toggle') {
+        kb.push([{ text: it.value ? '🔌 Заряд от сети: ВКЛ — выключить' : '🔌 Заряд от сети: ВЫКЛ — включить', callback_data: `c:${k}:${it.value ? 0 : 1}` }]);
+      } else if (kind === 'number') {
+        kb.push([{ text: `✏️ ${BTN[k] || it.label}: ${fmt(it)}`, callback_data: `e:${k}` }]);
+      } else {
+        kb.push(kind.map((o) => ({ text: `${o.v === it.value ? '● ' : ''}${short(it)} ${o.t}`, callback_data: `c:${k}:${o.v}` })));
+      }
     }
-    kb.push([{ text: '← Назад', callback_data: 'r' }]);
+    kb.push([{ text: '🔄 Обновить', callback_data: 's' }]);
     return kb;
+  }
+  // Ожидание ввода числа: chat -> { key, mid, until }
+  const pendingInput = new Map();
+  function rangeHint(it) {
+    const f = (v) => String(v).replace('.', ',');
+    return `от ${f(it.min)} до ${f(it.max)} ${it.unit}${it.step && it.step !== 1 && it.step !== 0.1 ? `, шаг ${f(it.step)}` : ''}`;
+  }
+  function confirmView(it, key, value) {
+    const warn = key === 'gridCharge' && value === 0 ? '\n\n⚠️ Батарея перестанет заряжаться от сети, пока не включите обратно.' : '';
+    return [`<b>${esc(it.label)}</b>\n\nБыло: ${esc(fmt(it))}\nСтанет: <b>${esc(fmt(it, value))}</b>${warn}\n\nЗаписать в инвертор?`,
+      [[{ text: '✅ Да, записать', callback_data: `y:${key}:${value}` }, { text: '✖️ Отмена', callback_data: 's' }]]];
+  }
+  async function onNumberInput(chat, text) {
+    const p = pendingInput.get(chat);
+    const it = getControls().items.find((i) => i.key === p.key);
+    if (!it) { pendingInput.delete(chat); return send(chat, 'Настройка сейчас недоступна.'); }
+    const v = Number(String(text).replace(',', '.').replace(/[^\d.\-]/g, ''));
+    const steps = (v - it.min) / (it.step || 1);
+    if (!Number.isFinite(v) || !/\d/.test(text) || v < it.min - 1e-9 || v > it.max + 1e-9 || Math.abs(steps - Math.round(steps)) > 1e-6) {
+      return send(chat, `❌ Нужно число ${rangeHint(it)}. Попробуйте ещё раз:`, [[{ text: '✖️ Отмена', callback_data: 'x' }]]);
+    }
+    pendingInput.delete(chat);
+    if (v === it.value) return send(chat, `ℹ️ ${esc(it.label)} уже ${esc(fmt(it))}.`, settingsKb());
+    const [t, kb] = confirmView(it, p.key, v);
+    return send(chat, t, kb);
   }
   const short = (it) => ({ gridCharge: 'Заряд:', energyMode: 'Режим', gridChargeCurrent: 'Ток' }[it.key] || it.label);
   function fmt(it, v = it.value) {
@@ -146,33 +204,44 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     return `${String(v).replace('.', ',')} ${it.unit}`;
   }
 
+  // ---------- вход по паролю ----------
+  async function onStranger(m, chat, text, cmd, arg) {
+    const f = passFails.get(chat);
+    if (f && f.until > Date.now()) return; // временно не отвечаем после 5 ошибок
+    const attempt = cmd === '/start' ? arg : text;
+    if (!attempt || cmd === '/start' && !arg) {
+      return send(chat, PASSWORD ? '🔒 Это личный бот. Отправьте пароль доступа.' : '🔒 Это личный бот.');
+    }
+    // сообщение с паролем убираем из переписки (в любом случае — и верный, и неверный)
+    call('deleteMessage', { chat_id: chat, message_id: m.message_id }).catch(() => {});
+    if (checkPassword(attempt)) {
+      passFails.delete(chat);
+      state.chats.push(chat); save();
+      log(`telegram: доступ выдан чату ${chat} (${m.from?.username ? '@' + m.from.username : m.from?.first_name || ''})`);
+      await sendMenu(chat, '✅ <b>Доступ открыт.</b> Пароль больше вводить не нужно — даже после перезапуска.\n\nУведомления <b>включены</b> 🔔 Буду сразу писать, когда:\n🔴 пропала сеть\n🟢 сеть вернулась (и сколько её не было)\n⚠️ у инвертора ошибка\n🪫 садится батарея\n\nМеню — кнопками внизу 👇');
+      return send(chat, statusText(), statusKb());
+    }
+    const n = (f?.n || 0) + 1;
+    passFails.set(chat, { n, until: n >= 5 ? Date.now() + 30 * 60000 : 0 });
+    log(`telegram: неверный пароль от чата ${chat} (${n})`);
+    return send(chat, n >= 5 ? '⛔ Слишком много попыток. Попробуйте через 30 минут.' : `❌ Неверный пароль (${n}/5).`);
+  }
+
   // ---------- обработка ----------
   async function onMessage(m) {
     const chat = m.chat.id, text = (m.text || '').trim();
     const [cmd, arg] = text.split(/\s+/);
-    if (cmd === '/start' || cmd === '/pair') {
-      if (allowed(chat)) { await sendMenu(chat, 'Меню — кнопками внизу 👇'); return send(chat, statusText(), statusKb()); }
-      const f = pairFails.get(chat) || 0;
-      if (f >= 5) return; // молчим после 5 попыток
-      if (arg && arg === pairCode && Date.now() < pairUntil) {
-        state.chats.push(chat); save();
-        log(`telegram: привязан чат ${chat} (${m.from?.username || m.from?.first_name || ''})`);
-        await sendMenu(chat, '✅ <b>Чат привязан.</b>\n\nБуду сразу писать, когда:\n🔴 пропала сеть\n🟢 сеть вернулась (и сколько её не было)\n⚠️ у инвертора ошибка\n🪫 садится батарея\n\nМеню — кнопками внизу 👇');
-        return send(chat, statusText(), statusKb());
-      }
-      pairFails.set(chat, f + 1);
-      return send(chat, '🔒 Это личный бот. Отправьте /start и код, который показан в Termux при запуске дашборда.');
+    if (!allowed(chat)) return onStranger(m, chat, text, cmd, arg);
+    const isMenu = Object.values(MENU).includes(text) || text.startsWith('/');
+    if (pendingInput.has(chat)) {
+      if (!isMenu && Date.now() < pendingInput.get(chat).until) return onNumberInput(chat, text);
+      pendingInput.delete(chat); // нажали другое меню — отменяем ввод
     }
-    if (!allowed(chat)) return; // чужим не отвечаем
+    if (cmd === '/start') { await sendMenu(chat, 'Меню — кнопками внизу 👇'); return send(chat, statusText(), statusKb()); }
     if (cmd === '/status' || cmd === '/s' || text === MENU.status) return send(chat, statusText(), statusKb());
     if (cmd === '/settings' || text === MENU.settings) return send(chat, settingsText(), settingsKb());
     if (cmd === '/day' || text === MENU.day) return send(chat, dayText(), [[{ text: '🔄 Обновить', callback_data: 'd' }]]);
-    if (cmd === '/mute' || text === MENU.mute) {
-      const i = state.muted.indexOf(chat);
-      if (i >= 0) state.muted.splice(i, 1); else state.muted.push(chat);
-      save();
-      return send(chat, i >= 0 ? '🔔 Уведомления включены' : '🔕 Уведомления выключены (команда /mute — включить обратно)');
-    }
+    if (cmd === '/mute' || cmd === '/notify' || text === MENU.mute || text === MENU.muteOff) return send(chat, notifyText(chat), notifyKb(chat));
     if (cmd === '/unlink') { state.chats = state.chats.filter((c) => c !== chat); save(); return send(chat, 'Чат отвязан.'); }
     return sendMenu(chat, 'Пользуйтесь кнопками внизу 👇\nЕщё: /unlink — отвязать этот чат');
   }
@@ -185,14 +254,29 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     if (t === 'r') { await edit(chat, mid, statusText(), statusKb()); return answer(); }
     if (t === 's') { await edit(chat, mid, settingsText(), settingsKb()); return answer(); }
     if (t === 'd') { await edit(chat, mid, dayText(), [[{ text: '🔄 Обновить', callback_data: 'd' }]]); return answer(); }
+    if (t === 'n') { // уведомления: явное вкл/выкл, без «переключателя вслепую»
+      const on = key === '1';
+      state.muted = state.muted.filter((c) => c !== chat);
+      if (!on) state.muted.push(chat);
+      save();
+      await edit(chat, mid, notifyText(chat), notifyKb(chat));
+      await sendMenu(chat, on ? '🔔 Уведомления включены' : '🔕 Уведомления выключены');
+      return answer(on ? 'Включены' : 'Выключены');
+    }
+    if (t === 'x') { pendingInput.delete(chat); await edit(chat, mid, settingsText(), settingsKb()); return answer('Отменено'); }
     const it = getControls().items.find((i) => i.key === key);
     if (!it || !(key in QUICK)) return answer('Недоступно');
+    if (t === 'e') { // ввод числа сообщением
+      pendingInput.set(chat, { key, until: Date.now() + 5 * 60000 });
+      await edit(chat, mid, `✏️ <b>${esc(it.label)}</b>\n\nСейчас: <b>${esc(fmt(it))}</b>\nОтправьте новое значение числом — ${esc(rangeHint(it))}.${it.hint ? `\n\n<i>${esc(it.hint)}</i>` : ''}`,
+        [[{ text: '✖️ Отмена', callback_data: 'x' }]]);
+      return answer();
+    }
     const value = Number(val);
     if (t === 'c') { // подтверждение
       if (value === it.value) return answer('Уже установлено');
-      const warn = key === 'gridCharge' && value === 0 ? '\n\n⚠️ Батарея перестанет заряжаться от сети, пока не включите обратно.' : '';
-      await edit(chat, mid, `<b>${esc(it.label)}</b>\n\nБыло: ${esc(fmt(it))}\nСтанет: <b>${esc(fmt(it, value))}</b>${warn}\n\nЗаписать в инвертор?`,
-        [[{ text: '✅ Да, записать', callback_data: `y:${key}:${value}` }, { text: '✖️ Отмена', callback_data: 'r' }]]);
+      const [txt, kb] = confirmView(it, key, value);
+      await edit(chat, mid, txt, kb);
       return answer();
     }
     if (t === 'y') {
@@ -200,7 +284,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
       const who = q.from?.username ? '@' + q.from.username : q.from?.first_name || String(chat);
       const r = await applyControl(key, value, { via: 'telegram', user: who });
       const res = r.entry?.ok ? `✅ ${esc(it.label)}: <b>${esc(r.entry.after)}</b>` : `❌ Не удалось: ${esc(r.error || r.entry?.error || r.entry?.note)}`;
-      return edit(chat, mid, `${res}\n\n${statusText()}`, statusKb());
+      return edit(chat, mid, `${res}\n\n${settingsText()}`, settingsKb());
     }
   }
 
@@ -254,7 +338,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
         { command: 'status', description: 'Состояние инвертора' },
         { command: 'settings', description: 'Настройки и управление' },
         { command: 'day', description: 'Отключения и батарея за сутки' },
-        { command: 'mute', description: 'Уведомления вкл/выкл' },
+        { command: 'notify', description: 'Уведомления: вкл / выкл' },
       ] });
     } catch (e) { log(`telegram: ${e.message} — проверьте токен`); }
     while (!signal?.aborted) {

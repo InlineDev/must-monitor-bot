@@ -324,11 +324,10 @@ footer a { color: inherit; }
 </div>
 
 <script>
-// Знаки мощностей. По первому замеру (ByPass, нагрузка 13 Вт, PGrid = -20 Вт):
-// отрицательное значение сети, похоже, означает потребление из сети.
-// Для батареи предполагаем: < 0 — разряд. Если днём окажется наоборот — поменяйте на -1.
-const GRID_IMPORT_SIGN = -1;
-const BAT_CHARGE_SIGN = 1;
+// Знаки мощностей приходят с сервера (BATTERY_POWER_SIGN / GRID_POWER_SIGN в .env).
+// После умножения: батарея > 0 — заряд, сеть > 0 — потребление из сети.
+let GRID_IMPORT_SIGN = -1;
+let BAT_CHARGE_SIGN = -1;
 
 const $ = (id) => document.getElementById(id);
 const fmtW = (w) => (w == null ? '—' : Math.abs(w) >= 1000 ? (w / 1000).toFixed(2).replace('.', ',') + ' кВт' : Math.round(w) + ' Вт');
@@ -553,6 +552,7 @@ async function boot() {
     const r = await fetch('/api/state?since=' + (Date.now() - 48 * 3600e3));
     const s = await r.json();
     latest = s.latest; status = s.status; history = s.history;
+    if (s.config) { BAT_CHARGE_SIGN = s.config.batterySign; GRID_IMPORT_SIGN = s.config.gridSign; }
     appendLog(s.logs);
   } catch (e) { appendLog([{ ts: Date.now(), line: 'не удалось загрузить состояние: ' + e.message }]); }
   renderNow(); renderStatus(); drawAll();
