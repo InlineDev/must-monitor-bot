@@ -1,0 +1,11 @@
+# данные и секреты
+data/
+.env
+.dashpass
+.controlpin
+.tgtoken
+public-url.txt
+*.log
+node_modules/
+.DS_Store
+.loggerip
