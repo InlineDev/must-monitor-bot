@@ -7,6 +7,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import { formatRuntime } from './runtime.mjs';
 
 // Знаки мощностей MUST PV18 — те же, что в dashboard.mjs. После умножения: батарея > 0 — заряд, сеть > 0 — из сети.
 const GRID_IMPORT_SIGN = -1;
@@ -60,11 +61,12 @@ const QUICK = {
   stopChargeV: 'number',
   absorptionV: 'number',
   floatV: 'number',
+  batteryAh: 'number',
 };
 // Короткие подписи для кнопок (полные названия — в тексте раздела)
 const BTN = {
   gridChargeCurrent: 'Ток заряда', stopDischargeV: 'Переход на сеть', stopChargeV: 'Возврат на батарею',
-  absorptionV: 'Заряд (absorption)', floatV: 'Поддержка (float)',
+  absorptionV: 'Заряд (absorption)', floatV: 'Поддержка (float)', batteryAh: 'Ёмкость батареи',
 };
 
 export function startTelegram({ token, dataDir, getLatest, getStatus, getControls, getHistory, applyControl, log, signal }) {
@@ -151,13 +153,14 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
       '',
       `${gridOn ? '🟢' : '🔴'} <b>Сеть:</b> ${gridOn ? `${n1(d.gridVoltage_V)} В · ${(d.gridFrequency_Hz ?? 0).toFixed(2).replace('.', ',')} Гц${Math.abs(grid) > 5 ? ` · ${grid > 0 ? 'берём' : 'отдаём'} ${gridEst ? '≈' : ''}${fmtW(Math.abs(grid))}` : ''}` : 'нет напряжения'}`,
       `🔋 <b>Батарея:</b> ${batteryLine(bat, d.inverterBatteryVoltage_V, stageOpts())}`,
+      bat < 0 ? formatRuntime(d.runtime) : null,
       `🏠 <b>Нагрузка:</b> ${fmtW(d.loadPower_W)} (${d.loadPercent ?? '—'} %)`,
       `🔌 <b>Заряд от сети:</b> ${gc?.value == null ? '—' : gc.value ? 'вкл' : 'выкл'}`,
       `🌡 ${d.dcRadiatorTemp_C ?? '—'} / ${d.acRadiatorTemp_C ?? '—'} °C`,
       errs.length ? `\n⚠️ ${esc(errs.join('; '))}` : '',
       '',
       `<i>${age > 120000 ? `⚠️ данные устарели: ${dur(age)} назад` : `обновлено ${hms(d.ts)}`}${st.connected ? '' : ' · логгер не на связи'}</i>`,
-    ].filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n');
+    ].filter((l) => l != null).filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n');
   }
 
   const statusKb = () => [[{ text: '🔄 Обновить', callback_data: 'r' }]];
@@ -195,7 +198,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     if (!ctl.items.length) return 'Настройки ещё не прочитаны с инвертора.';
     const line = (k) => { const it = ctl.items.find((i) => i.key === k); return it ? `• ${esc(it.label)}: <b>${esc(fmt(it))}</b>` : ''; };
     return ['<b>⚙️ Настройки</b>', '', line('energyMode'), line('gridCharge'), line('gridChargeCurrent'),
-      '', '<b>Пороги батареи</b>', line('stopDischargeV'), line('stopChargeV'), line('absorptionV'), line('floatV'),
+      '', '<b>Пороги батареи</b>', line('stopDischargeV'), line('stopChargeV'), line('absorptionV'), line('floatV'), line('batteryAh'),
       '', '<i>Нажмите ✏️, чтобы изменить значение.</i>'].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n');
   }
   function settingsKb() {
@@ -350,7 +353,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
         if (gridOn) { state.outages.push({ from: was, to: d.ts }); state.outages = state.outages.filter((o) => o.to > Date.now() - 7 * 86400e3); save(); }
         notify(gridOn
           ? `🟢 <b>Сеть вернулась</b> в ${hm(d.ts)}. Без сети: ${dur(d.ts - was)}.\n🔋 ${n1(d.inverterBatteryVoltage_V)} В`
-          : `🔴 <b>Пропала сеть</b> в ${hm(d.ts)}. Работаем от батареи.\n🔋 ${batteryLine(batteryFlow((d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN, null, d.pvPower_W), d.inverterBatteryVoltage_V)}\n🏠 Нагрузка ${fmtW(d.loadPower_W)}`);
+          : `🔴 <b>Пропала сеть</b> в ${hm(d.ts)}. Работаем от батареи.\n🔋 ${batteryLine(batteryFlow((d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN, null, d.pvPower_W), d.inverterBatteryVoltage_V)}\n🏠 Нагрузка ${fmtW(d.loadPower_W)}${d.runtime ? '\n' + formatRuntime(d.runtime) : ''}`);
       }
     } else alert.gridPending = 0;
     // батарея: порог = «переход на сеть» + 0,5 В, иначе 23,5 В для 24-вольтовой системы

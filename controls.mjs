@@ -68,6 +68,11 @@ export const CONTROLS = [
     hint: 'После полного заряда батарея держится на этом напряжении. Из паспорта АКБ (обычно 27,0–27,6 В для свинца 24 В, ~27,0 В для LiFePO4 8S).',
   },
   {
+    key: 'batteryAh', address: 10111, type: 'number', group: 'Батарея',
+    label: 'Ёмкость батареи', unit: 'А·ч', coeff: 1, range: () => ({ min: 1, max: 900, step: 1 }),
+    hint: 'Ёмкость вашей батареи (суммарно для всей сборки). По ней считается «хватит примерно на …» при работе от батареи.',
+  },
+  {
     key: 'stopDischargeV', address: 20118, type: 'number', group: 'Батарея',
     label: 'Переход на сеть при', unit: 'В', coeff: 0.1,
     range: (gr) => ({ min: +(g(gr) * 22).toFixed(1), max: +(g(gr) * 29).toFixed(1), step: 0.1 }),

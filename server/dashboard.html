@@ -415,7 +415,9 @@ function renderNow() {
   $('k-load').innerHTML = splitUnit(fmtW(load));
   $('k-load-d').textContent = `${d.loadPercent ?? '—'} % от номинала · ${fmt(d.loadCurrent_A)} А`;
   $('k-bat').innerHTML = `${fmt(d.inverterBatteryVoltage_V)}<small>В</small>`;
-  $('k-bat-d').textContent = bat ? `${stage} ${fmt(batA)} А · ${fmtW(Math.abs(bat))}` : (stage === 'поддержка' ? 'полная, поддержка' : 'покой');
+  const rt = d.runtime && bat < 0 && Number.isFinite(d.runtime.minutes) ? d.runtime : null;
+  const rtTxt = rt ? ` · ≈${rt.minutes >= 60 ? Math.floor(rt.minutes / 60) + ' ч ' + String(Math.round(rt.minutes % 60)).padStart(2, '0') + ' мин' : Math.round(rt.minutes) + ' мин'}` : '';
+  $('k-bat-d').textContent = bat ? `${stage} ${fmt(batA)} А · ${fmtW(Math.abs(bat))}${rtTxt}` : (stage === 'поддержка' ? 'полная, поддержка' : 'покой');
   $('k-grid').innerHTML = (gridEst ? '≈ ' : '') + splitUnit(fmtW(Math.abs(grid)));
   $('k-grid-d').textContent = `${grid > 5 ? 'из сети' : grid < -5 ? 'в сеть' : 'нет обмена'} · ${fmt(d.gridVoltage_V)} В`;
 

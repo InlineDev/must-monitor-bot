@@ -17,7 +17,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { run } from './must-eybond.mjs';
-import { startTelegram } from './telegram.mjs';
+import { startTelegram, batteryFlow } from './telegram.mjs';
+import { createRuntimeEstimator, batteryProfile } from './runtime.mjs';
 import { CONTROLS, CONTROL_RANGES, describe, getControl, toRaw, toDisplay, formatValue } from './controls.mjs';
 
 const DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -107,7 +108,14 @@ function broadcast(event, payload) {
   for (const res of clients) res.write(msg);
 }
 
+const runtimeEst = createRuntimeEstimator();
 function onData(d) {
+  // оценка времени работы от батареи (ёмкость и тип — из настроек инвертора)
+  const gcOn = ctl.registers[20143] == null ? null : ctl.registers[20143] !== 3 ? 1 : 0;
+  const bat = batteryFlow((d.batteryPower_W ?? 0) * BATTERY_POWER_SIGN, gcOn, d.pvPower_W);
+  const profile = batteryProfile(ctl.registers, d.battVolGrade);
+  runtimeEst.update(d, bat, profile);
+  d.runtime = runtimeEst.estimate(profile);
   latest = d;
   status.connected = true;
   status.lastOk = d.ts;
