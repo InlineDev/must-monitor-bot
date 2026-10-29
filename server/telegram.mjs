@@ -7,6 +7,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import https from 'node:https';
+import http from 'node:http';
 import { formatRuntime } from './runtime.mjs';
 
 // Знаки мощностей MUST PV18 — те же, что в dashboard.mjs. После умножения: батарея > 0 — заряд, сеть > 0 — из сети.
@@ -104,14 +106,44 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     return a.length === b.length && crypto.timingSafeEqual(a, b);
   };
 
-  async function call(method, body) {
-    const r = await fetch(`${API}/${method}`, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body || {}),
-      signal: AbortSignal.timeout(method === 'getUpdates' ? 65000 : 15000),
+  // Каждый запрос к Telegram — через НОВОЕ соединение (agent: false) и сначала по IPv4.
+  // Встроенный fetch переиспользует соединения; после «моргания» сети (переключение инвертора)
+  // они бывают «мёртвыми», и запросы висят до таймаута. Новое соединение этого лишено.
+  let preferV4 = true;
+  function rawPost(method, payload, timeoutMs, family) {
+    return new Promise((resolve, reject) => {
+      const u = new URL(`${API}/${method}`);
+      const data = Buffer.from(JSON.stringify(payload || {}));
+      const mod = u.protocol === 'http:' ? http : https;
+      const req = mod.request(u, {
+        method: 'POST', agent: false, family, timeout: timeoutMs,
+        headers: { 'content-type': 'application/json', 'content-length': data.length, connection: 'close' },
+      }, (res) => {
+        let b = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { b += c; });
+        res.on('end', () => { let j = {}; try { j = JSON.parse(b); } catch {} resolve({ status: res.statusCode, j }); });
+        res.on('error', reject);
+      });
+      req.on('timeout', () => req.destroy(new Error(`таймаут ${Math.round(timeoutMs / 1000)} с`)));
+      req.on('error', reject);
+      req.end(data);
     });
-    const j = await r.json().catch(() => ({}));
-    if (!j.ok) throw new Error(`${method}: ${j.description || r.status}`);
-    return j.result;
+  }
+  async function call(method, body) {
+    const timeoutMs = method === 'getUpdates' ? 65000 : 20000;
+    let r;
+    try {
+      r = await rawPost(method, body, timeoutMs, preferV4 ? 4 : 0);
+    } catch (e) {
+      // нет IPv4-маршрута — пробуем любой адрес (IPv6) и запоминаем
+      if (preferV4 && /ENETUNREACH|EHOSTUNREACH|EAI_AGAIN|ENOTFOUND|EADDRNOTAVAIL/.test(e.code || e.message)) {
+        preferV4 = false;
+        r = await rawPost(method, body, timeoutMs, 0);
+      } else throw e;
+    }
+    if (!r.j.ok) throw new Error(`${method}: ${r.j.description || 'HTTP ' + r.status}`);
+    return r.j.result;
   }
   const send = (chat_id, text, kb) => call('sendMessage', { chat_id, text, parse_mode: 'HTML', disable_web_page_preview: true, ...(kb ? { reply_markup: { inline_keyboard: kb } } : {}) })
     .catch((e) => log(`telegram: ${e.message}`));
@@ -352,9 +384,8 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
       while (state.outbox.length) {
         const it = state.outbox[0];
         if (Date.now() - it.ts > 24 * 3600e3 || !state.chats.includes(it.chat)) { state.outbox.shift(); save(); continue; }
-        const late = Date.now() - it.ts > 60000 ? `\n\n<i>⏱ Событие в ${hm(it.ts)}, сообщение задержалось: не было связи с Telegram.</i>` : '';
         try {
-          await call('sendMessage', { chat_id: it.chat, text: it.text + late, parse_mode: 'HTML', disable_web_page_preview: true });
+          await call('sendMessage', { chat_id: it.chat, text: it.text, parse_mode: 'HTML', disable_web_page_preview: true });
           state.outbox.shift(); save();
         } catch (e) {
           log(`telegram: уведомление не отправлено (${e.message}) — повтор через 30 с`);
@@ -384,8 +415,8 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
         alert.grid = gridOn; alert.gridSince = d.ts; alert.gridPending = 0;
         if (gridOn) { state.outages.push({ from: was, to: d.ts }); state.outages = state.outages.filter((o) => o.to > Date.now() - 7 * 86400e3); save(); }
         notify(gridOn
-          ? `🟢 <b>Сеть вернулась</b> в ${hm(d.ts)}. Без сети: ${dur(d.ts - was)}.\n🔋 ${n1(d.inverterBatteryVoltage_V)} В`
-          : `🔴 <b>Пропала сеть</b> в ${hm(d.ts)}. Работаем от батареи.\n🔋 ${batteryLine(batteryFlow((d.batteryPower_W ?? 0) * BAT_CHARGE_SIGN, null, d.pvPower_W), d.inverterBatteryVoltage_V)}\n🏠 Нагрузка ${fmtW(d.loadPower_W)}${d.runtime ? '\n' + formatRuntime(d.runtime) : ''}`);
+          ? `🟢 <b>Сеть вернулась</b> в ${hm(d.ts)}. Без сети: ${dur(d.ts - was)}.`
+          : `🔴 <b>Пропала сеть</b> в ${hm(d.ts)}. Работаем от батареи.${d.runtime ? '\n' + formatRuntime(d.runtime) : ''}`);
       }
     } else alert.gridPending = 0;
     // батарея: порог = «переход на сеть» + 0,5 В, иначе 23,5 В для 24-вольтовой системы
