@@ -8,7 +8,7 @@
 //  4. Время = (SoC − минимально допустимый SoC) × ёмкость × номинальное напряжение / средняя мощность разряда.
 // Всё приблизительно: показываем со знаком «≈».
 
-const BATTERY_TYPES = ['', 'своя', 'литий', 'свинцовая (sealed)', 'AGM', 'гелевая', 'заливная'];
+const BATTERY_TYPES = ['', 'своя (LiFePO4)', 'литий', 'свинцовая (sealed)', 'AGM', 'гелевая', 'заливная'];
 const NOISE_W = 50;
 const AVG_WINDOW_MS = 5 * 60000;
 
@@ -30,12 +30,16 @@ export function batteryProfile(registers, battVolGrade) {
   const ah = registers?.[10111] || null;
   const typeCode = registers?.[10110];
   const grade = battVolGrade || 24;
-  const lithium = typeCode === 2;
+  // 2 = литий; 1 = USER (своя) — на MUST его выбирают для LiFePO4, чтобы задать свои напряжения.
+  // Свинцом считаем только явно выбранные свинцовые типы (sealed / AGM / гель / заливная).
+  const lithium = typeCode === 2 || typeCode === 1 || typeCode == null;
   return {
     ah, grade, lithium,
     typeLabel: BATTERY_TYPES[typeCode] || 'неизвестный тип',
     nominalV: lithium ? (grade / 24) * 25.6 : grade,
-    socMin: lithium ? 10 : 50,          // свинец разряжать глубже 50 % — сильно сокращает срок службы
+    socMin: lithium ? 10 : 50,          // «бережный» предел: свинец глубже 50 % — сильно сокращает срок службы
+    // Эффект Пейкерта: при большом токе батарея отдаёт меньше паспортной ёмкости (паспорт — для 20-часового разряда)
+    peukertK: lithium ? 1.05 : 1.2,
     socFromVoltage(v) {
       if (!v) return null;
       return lithium ? interp(LFP_CELL, v / ((grade / 24) * 8)) : interp(LEAD_12V, v / (grade / 12));
@@ -64,7 +68,7 @@ export function createRuntimeEstimator() {
         session.ahOut += (Math.abs(bat) / (v || profile.nominalV)) * dt;
         session.lastTs = now;
       }
-      window.push({ ts: now, w: -bat });
+      window.push({ ts: now, w: -bat, v });
       endedAt = 0;
     } else if (session) {
       // разряд закончился: держим сессию 2 минуты (короткие паузы не сбрасывают счёт)
@@ -81,20 +85,38 @@ export function createRuntimeEstimator() {
     if (!profile.ah) return { needAh: true, avgW };
     if (session.soc0 == null) return null;
     const soc = Math.max(0, Math.min(100, session.soc0 - (session.ahOut / profile.ah) * 100));
-    const usableWh = Math.max(0, (soc - profile.socMin) / 100) * profile.ah * profile.nominalV;
-    const minutes = avgW > 5 ? (usableWh / avgW) * 60 : Infinity;
-    return { soc, minutes, avgW, ah: profile.ah, typeLabel: profile.typeLabel, socMin: profile.socMin, since: session.start };
+    // средний ток разряда и поправка Пейкерта на ёмкость при этом токе
+    const v = window[window.length - 1]?.v || profile.nominalV;
+    const amps = avgW / v;
+    const i20 = profile.ah / 20;
+    const factor = amps > i20 ? Math.pow(i20 / amps, profile.peukertK - 1) : 1;
+    const effAh = profile.ah * factor;
+    const minutesTo = (socTo) => (amps > 0.2 ? (Math.max(0, soc - socTo) / 100) * effAh / amps * 60 : Infinity);
+    return {
+      soc, avgW, amps, ah: profile.ah, effAh, typeLabel: profile.typeLabel, socMin: profile.socMin, lithium: profile.lithium,
+      minutes: minutesTo(0),                                   // до отключения инвертора
+      minutesSafe: profile.lithium ? null : minutesTo(profile.socMin), // до 50 % для свинца
+      since: session.start,
+    };
   }
 
   return { update, estimate };
 }
 
+const fmtMin = (min) => {
+  const m = Math.round(min);
+  return m < 60 ? `${m} мин` : `${Math.floor(m / 60)} ч ${String(m % 60).padStart(2, '0')} мин`;
+};
 export function formatRuntime(est) {
   if (!est) return null;
   if (est.needAh) return '⏳ Время работы не посчитать: в инверторе не указана ёмкость батареи (⚙️ Настройки → Ёмкость батареи)';
   if (!Number.isFinite(est.minutes) || est.minutes > 48 * 60) return `⏳ Хватит больше чем на сутки (заряд ≈${Math.round(est.soc)} %)`;
   if (est.minutes < 1) return `🪫 Батарея на пределе (заряд ≈${Math.round(est.soc)} %)`;
-  const m = Math.round(est.minutes);
-  const t = m < 60 ? `${m} мин` : `${Math.floor(m / 60)} ч ${String(m % 60).padStart(2, '0')} мин`;
-  return `⏳ Хватит примерно на <b>${t}</b> (заряд ≈${Math.round(est.soc)} %)`;
+  let line = `⏳ До отключения ≈ <b>${fmtMin(est.minutes)}</b> (заряд ≈${Math.round(est.soc)} %)`;
+  if (est.minutesSafe != null) {
+    line += est.minutesSafe >= 1
+      ? `\n<i>   бережно, до ${est.socMin} %: ≈ ${fmtMin(est.minutesSafe)}</i>`
+      : `\n<i>   ниже ${est.socMin} % — глубокий разряд сокращает ресурс свинцовой батареи</i>`;
+  }
+  return line;
 }
