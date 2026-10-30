@@ -152,7 +152,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   const allowed = (id) => state.chats.includes(id);
 
   // Постоянное меню внизу экрана — чтобы ничего не набирать
-  const MENU = { status: '📊 Статус', settings: '⚙️ Настройки', day: '📈 Сутки', mute: '🔔 Уведомления', muteOff: '🔕 Уведомления' };
+  const MENU = { status: '📊 Статус', settings: '⚙️ Настройки', day: '📈 Сегодня', dayOld: '📈 Сутки', mute: '🔔 Уведомления', muteOff: '🔕 Уведомления' };
   const isMuted = (chat) => state.muted.includes(chat);
   const menuKb = (chat) => ({ keyboard: [[{ text: MENU.status }, { text: MENU.settings }], [{ text: MENU.day }, { text: isMuted(chat) ? MENU.muteOff : MENU.mute }]], resize_keyboard: true, is_persistent: true });
   const sendMenu = (chat_id, text) => call('sendMessage', { chat_id, text, parse_mode: 'HTML', reply_markup: menuKb(chat_id) }).catch((e) => log(`telegram: ${e.message}`));
@@ -205,28 +205,47 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     return { absorptionV: val('absorptionV'), floatV: val('floatV'), gridChargeOn: val('gridCharge') === 1 && (d?.gridVoltage_V ?? 0) > 170 };
   };
 
-  function dayText() {
-    const now = Date.now(), from = now - 24 * 3600e3;
+  // Начало календарных суток в часовом поясе бота (по умолчанию Киев)
+  function dayStart(ts) {
+    const p = Object.fromEntries(new Intl.DateTimeFormat('en-CA', { timeZone: process.env.TZ || 'Europe/Kyiv', year: 'numeric', month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).formatToParts(ts).map((x) => [x.type, x.value]));
+    const asUtc = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+    const offset = asUtc - Math.floor(ts / 1000) * 1000;
+    return Date.UTC(+p.year, +p.month - 1, +p.day) - offset;
+  }
+  const dayTitle = (ts) => new Date(ts).toLocaleDateString('ru-RU', { day: 'numeric', month: 'long', timeZone: process.env.TZ || 'Europe/Kyiv' });
+  // back = 0 — сегодня (с 00:00), 1 — вчера (весь день)
+  function dayText(back = 0) {
+    const now = Date.now();
+    const from = dayStart(now) - back * 86400e3;
+    const to = back === 0 ? now : dayStart(now) - (back - 1) * 86400e3;
     const cur = alertRef.grid === false ? [{ from: alertRef.gridSince, to: now, ongoing: true }] : [];
-    const list = [...state.outages, ...cur].filter((o) => o.to > from).map((o) => ({ ...o, from: Math.max(o.from, from) }));
+    const list = [...state.outages, ...cur]
+      .filter((o) => o.to > from && o.from < to)
+      .map((o) => ({ ...o, from: Math.max(o.from, from), to: Math.min(o.to, to), ongoing: o.ongoing && back === 0 }));
     const total = list.reduce((a, o) => a + (o.to - o.from), 0);
     const longest = list.reduce((a, o) => Math.max(a, o.to - o.from), 0);
-    const hist = (getHistory?.() || []).filter((p) => p.ts >= from);
+    const hist = (getHistory?.() || []).filter((p) => p.ts >= from && p.ts < to);
     const vs = hist.map((p) => p.inverterBatteryVoltage_V ?? p.batteryVoltage_V).filter((v) => v > 0);
     const loads = hist.map((p) => p.loadPower_W).filter((v) => v != null);
-    const lines = ['<b>📈 За последние 24 часа</b>', ''];
+    const lines = [`<b>📈 ${back === 0 ? 'Сегодня' : 'Вчера'}, ${dayTitle(from)}</b>${back === 0 ? ` <i>(с 00:00)</i>` : ''}`, ''];
     if (!list.length) lines.push('🟢 Отключений сети не было');
     else {
       lines.push(`🔴 Отключений: <b>${list.length}</b>, всего без сети <b>${dur(total)}</b>`);
       lines.push(`⏱ Самое долгое: ${dur(longest)}`);
       lines.push('');
-      for (const o of list.slice(-8)) lines.push(`• ${hm(o.from)}–${o.ongoing ? 'сейчас' : hm(o.to)} (${dur(o.to - o.from)})`);
+      const shown = list.slice(-12);
+      if (list.length > shown.length) lines.push(`<i>…и ещё ${list.length - shown.length} раньше</i>`);
+      for (const o of shown) lines.push(`• ${hm(o.from)}–${o.ongoing ? 'сейчас' : hm(o.to)} (${dur(o.to - o.from)})`);
     }
     if (vs.length) { lines.push(''); lines.push(`🔋 Батарея: мин ${n1(Math.min(...vs))} В · макс ${n1(Math.max(...vs))} В`); }
     if (loads.length) lines.push(`🏠 Нагрузка: средняя ${fmtW(loads.reduce((a, b) => a + b, 0) / loads.length)} · пик ${fmtW(Math.max(...loads))}`);
-    if (!hist.length && !list.length) lines.push('', '<i>Истории пока мало — данные копятся с момента запуска.</i>');
+    if (!hist.length && !list.length) lines.push('', '<i>Данных за этот день нет.</i>');
     return lines.join('\n');
   }
+  const dayKb = (back) => [back === 0
+    ? [{ text: '◀ Вчера', callback_data: 'd:1' }, { text: '🔄 Обновить', callback_data: 'd:0' }]
+    : [{ text: 'Сегодня ▶', callback_data: 'd:0' }]];
 
   function settingsText() {
     const ctl = getControls();
@@ -322,7 +341,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     if (cmd === '/start') { await sendMenu(chat, 'Меню — кнопками внизу 👇'); return send(chat, statusText(), statusKb()); }
     if (cmd === '/status' || cmd === '/s' || text === MENU.status) return send(chat, statusText(), statusKb());
     if (cmd === '/settings' || text === MENU.settings) return send(chat, settingsText(), settingsKb());
-    if (cmd === '/day' || text === MENU.day) return send(chat, dayText(), [[{ text: '🔄 Обновить', callback_data: 'd' }]]);
+    if (cmd === '/day' || text === MENU.day || text === MENU.dayOld) return send(chat, dayText(0), dayKb(0));
     if (cmd === '/mute' || cmd === '/notify' || text === MENU.mute || text === MENU.muteOff) return send(chat, notifyText(chat), notifyKb(chat));
     if (cmd === '/unlink') { state.chats = state.chats.filter((c) => c !== chat); save(); return send(chat, 'Чат отвязан.'); }
     return sendMenu(chat, 'Пользуйтесь кнопками внизу 👇\nЕщё: /unlink — отвязать этот чат');
@@ -335,7 +354,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     const answer = (text) => call('answerCallbackQuery', { callback_query_id: q.id, text }).catch(() => {});
     if (t === 'r') { await edit(chat, mid, statusText(), statusKb()); return answer(); }
     if (t === 's') { await edit(chat, mid, settingsText(), settingsKb()); return answer(); }
-    if (t === 'd') { await edit(chat, mid, dayText(), [[{ text: '🔄 Обновить', callback_data: 'd' }]]); return answer(); }
+    if (t === 'd') { const back = key === '1' ? 1 : 0; await edit(chat, mid, dayText(back), dayKb(back)); return answer(); }
     if (t === 'n') { // уведомления: явное вкл/выкл, без «переключателя вслепую»
       const on = key === '1';
       state.muted = state.muted.filter((c) => c !== chat);
@@ -450,7 +469,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
       await call('setMyCommands', { commands: [
         { command: 'status', description: 'Состояние инвертора' },
         { command: 'settings', description: 'Настройки и управление' },
-        { command: 'day', description: 'Отключения и батарея за сутки' },
+        { command: 'day', description: 'Отключения и батарея за сегодня' },
         { command: 'notify', description: 'Уведомления: вкл / выкл' },
       ] });
     } catch (e) { log(`telegram: ${e.message} — проверьте токен`); }
