@@ -225,10 +225,17 @@ async function applyControl(key, value, who) {
   try {
     if (beforeRaw === raw || (c.type === 'switch' && toDisplay(c, beforeRaw) === toDisplay(c, raw))) { entry.after = entry.before; entry.ok = true; entry.note = 'значение уже установлено'; }
     else {
-      const back = await inverter.write(c.address, raw);
+      const same = (v) => v === raw || (c.type === 'switch' && toDisplay(c, v) === toDisplay(c, raw));
+      let back = await inverter.write(c.address, raw);
+      // инвертор иногда применяет настройку с задержкой — перечитываем ещё несколько раз
+      for (const ms of [1500, 3000, 5000]) {
+        if (same(back)) break;
+        await new Promise((r) => setTimeout(r, ms));
+        try { [back] = await inverter.read(c.address, 1); } catch {}
+      }
       ctl.registers[c.address] = back;
       entry.after = formatValue(c, toDisplay(c, back));
-      entry.ok = back === raw || (c.type === 'switch' && toDisplay(c, back) === toDisplay(c, raw));
+      entry.ok = same(back);
       if (!entry.ok) entry.note = 'инвертор принял команду, но значение не изменилось';
     }
   } catch (e) {

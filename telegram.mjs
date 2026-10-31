@@ -329,7 +329,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
   const quietLabel = () => `${state.quiet.from}–${state.quiet.to} · ${state.quiet.enabled ? (state.quiet.active ? 'сейчас действует' : 'вкл') : 'выкл'}`;
   const quietText = () => [
     '<b>🌙 Тихий режим</b>', '',
-    'В это время бот выключает заряд от сети, а в конце включает его обратно (если до этого он был включён).', '',
+    'В это время бот выключает заряд от сети, а в конце окна включает его.', '',
     `Состояние: <b>${state.quiet.enabled ? 'включён' : 'выключен'}</b>`,
     `Время: <b>${state.quiet.from} – ${state.quiet.to}</b>`,
     state.quiet.active ? `\n🌙 Сейчас действует: заряд выключен до ${state.quiet.to}` : '',
@@ -357,13 +357,13 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
         q.active = true; q.prevOn = was; save();
         notify(was ? `🌙 <b>Тихий режим</b> до ${q.to}: заряд от сети выключен.` : `🌙 <b>Тихий режим</b> до ${q.to} (заряд от сети и так был выключен).`);
       } else if (!inWin && q.active) {
-        if (q.prevOn && gc.value === 0) {
+        // вне тихого режима заряд от сети всегда включён
+        if (gc.value === 0) {
           const r = await applyControl('gridCharge', 1, { via: 'тихий режим', user: 'расписание' });
           if (!r.entry?.ok) { log(`тихий режим: не удалось включить заряд (${r.error || r.entry?.error || r.entry?.note}) — повтор через минуту`); return; }
         }
-        const restored = q.prevOn;
         q.active = false; q.prevOn = null; save();
-        notify(restored ? '☀️ <b>Тихий режим закончился:</b> заряд от сети снова включён.' : '☀️ Тихий режим закончился.');
+        notify('☀️ <b>Тихий режим закончился:</b> заряд от сети включён.');
       }
     } finally { quietBusy = false; }
   }
