@@ -189,7 +189,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
       `🔋 <b>Батарея:</b> ${batteryLine(bat, d.inverterBatteryVoltage_V, stageOpts())}`,
       bat < 0 ? formatRuntime(d.runtime) : null,
       `🏠 <b>Нагрузка:</b> ${fmtW(d.loadPower_W)} (${d.loadPercent ?? '—'} %)`,
-      `🔌 <b>Заряд от сети:</b> ${gc?.value == null ? '—' : gc.value ? 'вкл' : 'выкл'}`,
+      `🔌 <b>Заряд от сети:</b> ${gc?.value == null ? '—' : gc.value ? 'вкл' : 'выкл'}${state.quiet?.active ? ` · 🌙 тихий режим до ${state.quiet.to}` : ''}`,
       `🌡 ${d.dcRadiatorTemp_C ?? '—'} / ${d.acRadiatorTemp_C ?? '—'} °C`,
       errs.length ? `\n⚠️ ${esc(errs.join('; '))}` : '',
       '',
@@ -253,6 +253,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     const line = (k) => { const it = ctl.items.find((i) => i.key === k); return it ? `• ${esc(it.label)}: <b>${esc(fmt(it))}</b>` : ''; };
     return ['<b>⚙️ Настройки</b>', '', line('energyMode'), line('gridCharge'), line('gridChargeCurrent'),
       '', '<b>Пороги батареи</b>', line('stopDischargeV'), line('stopChargeV'), line('absorptionV'), line('floatV'), line('batteryAh'),
+      '', `🌙 <b>Тихий режим:</b> ${quietLabel()}`,
       '', '<i>Нажмите ✏️, чтобы изменить значение.</i>'].filter((l, i, a) => l !== '' || a[i - 1] !== '').join('\n');
   }
   function settingsKb() {
@@ -269,10 +270,81 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
         kb.push(kind.map((o) => ({ text: `${o.v === it.value ? '● ' : ''}${short(it)} ${o.t}`, callback_data: `c:${k}:${o.v}` })));
       }
     }
+    kb.push([{ text: `🌙 Тихий режим: ${quietLabel()}`, callback_data: 'q' }]);
     kb.push([{ text: '🔄 Обновить', callback_data: 's' }]);
     return kb;
   }
-  // Ожидание ввода числа: chat -> { key, mid, until }
+  // ---------- тихий режим ----------
+  // В заданное время бот выключает заряд от сети, в конце окна — включает обратно (если он был включён).
+  // Настройки и текущее состояние хранятся в data/telegram.json.
+  state.quiet = { enabled: false, from: '23:00', to: '07:00', active: false, prevOn: null, ...(state.quiet || {}) };
+  const TZ = process.env.TZ || 'Europe/Kyiv';
+  const localMinutes = (ts) => {
+    const p = Object.fromEntries(new Intl.DateTimeFormat('en-GB', { timeZone: TZ, hour: '2-digit', minute: '2-digit', hour12: false })
+      .formatToParts(ts).map((x) => [x.type, x.value]));
+    return (+p.hour % 24) * 60 + +p.minute;
+  };
+  const toMin = (hhmm) => { const [h, m] = hhmm.split(':').map(Number); return h * 60 + m; };
+  const inQuietWindow = (ts = Date.now()) => {
+    const q = state.quiet, now = localMinutes(ts), a = toMin(q.from), b = toMin(q.to);
+    if (a === b) return false;
+    return a < b ? now >= a && now < b : now >= a || now < b; // окно через полночь
+  };
+  const quietLabel = () => `${state.quiet.from}–${state.quiet.to} · ${state.quiet.enabled ? (state.quiet.active ? 'сейчас действует' : 'вкл') : 'выкл'}`;
+  const quietText = () => [
+    '<b>🌙 Тихий режим</b>', '',
+    'В это время бот выключает заряд от сети, а в конце включает его обратно (если до этого он был включён).', '',
+    `Состояние: <b>${state.quiet.enabled ? 'включён' : 'выключен'}</b>`,
+    `Время: <b>${state.quiet.from} – ${state.quiet.to}</b>`,
+    state.quiet.active ? `\n🌙 Сейчас действует: заряд выключен до ${state.quiet.to}` : '',
+  ].filter((l) => l !== '').join('\n');
+  const quietKb = () => [
+    [{ text: state.quiet.enabled ? '✅ Включён — выключить' : '⭕ Выключен — включить', callback_data: 'q:t' }],
+    [{ text: `✏️ Начало: ${state.quiet.from}`, callback_data: 'q:f' }, { text: `✏️ Конец: ${state.quiet.to}`, callback_data: 'q:e' }],
+    [{ text: '← Настройки', callback_data: 's' }],
+  ];
+  let quietBusy = false;
+  async function quietTick() {
+    const q = state.quiet;
+    if (quietBusy) return;
+    const gc = getControls().items.find((i) => i.key === 'gridCharge');
+    if (!gc || gc.value == null) return; // настройки инвертора ещё не прочитаны
+    const inWin = q.enabled && inQuietWindow();
+    quietBusy = true;
+    try {
+      if (inWin && !q.active) {
+        const was = gc.value === 1;
+        if (was) {
+          const r = await applyControl('gridCharge', 0, { via: 'тихий режим', user: 'расписание' });
+          if (!r.entry?.ok) { log(`тихий режим: не удалось выключить заряд (${r.error || r.entry?.error || r.entry?.note}) — повтор через минуту`); return; }
+        }
+        q.active = true; q.prevOn = was; save();
+        notify(was ? `🌙 <b>Тихий режим</b> до ${q.to}: заряд от сети выключен.` : `🌙 <b>Тихий режим</b> до ${q.to} (заряд от сети и так был выключен).`);
+      } else if (!inWin && q.active) {
+        if (q.prevOn && gc.value === 0) {
+          const r = await applyControl('gridCharge', 1, { via: 'тихий режим', user: 'расписание' });
+          if (!r.entry?.ok) { log(`тихий режим: не удалось включить заряд (${r.error || r.entry?.error || r.entry?.note}) — повтор через минуту`); return; }
+        }
+        const restored = q.prevOn;
+        q.active = false; q.prevOn = null; save();
+        notify(restored ? '☀️ <b>Тихий режим закончился:</b> заряд от сети снова включён.' : '☀️ Тихий режим закончился.');
+      }
+    } finally { quietBusy = false; }
+  }
+  setInterval(() => quietTick().catch((e) => log(`тихий режим: ${e.message}`)), 30000).unref();
+  async function onTimeInput(chat, text) {
+    const p = pendingInput.get(chat);
+    const m = String(text).trim().match(/^(\d{1,2})(?:[:.\-\s]?(\d{2}))?$/);
+    const h = m ? +m[1] : NaN, mi = m && m[2] ? +m[2] : 0;
+    if (!m || h > 23 || mi > 59) return send(chat, '❌ Нужно время в формате ЧЧ:ММ, например <b>23:00</b> или <b>7:30</b>. Попробуйте ещё раз:', [[{ text: '✖️ Отмена', callback_data: 'q' }]]);
+    pendingInput.delete(chat);
+    state.quiet[p.field] = `${String(h).padStart(2, '0')}:${String(mi).padStart(2, '0')}`;
+    save();
+    await send(chat, quietText(), quietKb());
+    quietTick().catch(() => {});
+  }
+
+  // Ожидание ввода: chat -> { key, until } для чисел или { kind: 'time', field, until } для времени
   const pendingInput = new Map();
   function rangeHint(it) {
     const f = (v) => String(v).replace('.', ',');
@@ -335,7 +407,7 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     if (!allowed(chat)) return onStranger(m, chat, text, cmd, arg);
     const isMenu = Object.values(MENU).includes(text) || text.startsWith('/');
     if (pendingInput.has(chat)) {
-      if (!isMenu && Date.now() < pendingInput.get(chat).until) return onNumberInput(chat, text);
+      if (!isMenu && Date.now() < pendingInput.get(chat).until) return pendingInput.get(chat).kind === 'time' ? onTimeInput(chat, text) : onNumberInput(chat, text);
       pendingInput.delete(chat); // нажали другое меню — отменяем ввод
     }
     if (cmd === '/start') { await sendMenu(chat, 'Меню — кнопками внизу 👇'); return send(chat, statusText(), statusKb()); }
@@ -365,6 +437,19 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
       return answer(on ? 'Включены' : 'Выключены');
     }
     if (t === 'x') { pendingInput.delete(chat); await edit(chat, mid, settingsText(), settingsKb()); return answer('Отменено'); }
+    if (t === 'q') {
+      if (key === 't') { state.quiet.enabled = !state.quiet.enabled; save(); quietTick().catch(() => {}); }
+      if (key === 'f' || key === 'e') {
+        const field = key === 'f' ? 'from' : 'to';
+        pendingInput.set(chat, { kind: 'time', field, until: Date.now() + 5 * 60000 });
+        await edit(chat, mid, `✏️ <b>${field === 'from' ? 'Начало' : 'Конец'} тихого режима</b>\n\nСейчас: <b>${state.quiet[field]}</b>\nОтправьте время в формате ЧЧ:ММ, например <b>${field === 'from' ? '23:00' : '07:00'}</b>.`,
+          [[{ text: '✖️ Отмена', callback_data: 'q' }]]);
+        return answer();
+      }
+      pendingInput.delete(chat);
+      await edit(chat, mid, quietText(), quietKb());
+      return answer(key === 't' ? (state.quiet.enabled ? 'Тихий режим включён' : 'Тихий режим выключен') : undefined);
+    }
     const it = getControls().items.find((i) => i.key === key);
     if (!it || !(key in QUICK)) return answer('Недоступно');
     if (t === 'e') { // ввод числа сообщением
