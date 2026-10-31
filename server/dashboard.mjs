@@ -347,6 +347,7 @@ for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => { ac.abort(); if 
       await run({
         loggerIp, host: opt('host', 'HOST'), port: Number(opt('port', 'LOGGER_PORT', 8899)), slave: Number(opt('slave', 'SLAVE', 4)),
         watch: interval, onData, onLog, signal: ac.signal, noAnnounce, allowIps,
+        getInterval: () => (bot?.liveActive?.() ? Math.min(5, interval) : interval),
         onReady: (api) => { inverter = api; },
       });
     } catch (e) {

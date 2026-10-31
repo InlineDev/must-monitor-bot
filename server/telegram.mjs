@@ -197,7 +197,43 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     ].filter((l) => l != null).filter((l, i, a) => !(l === '' && a[i - 1] === '')).join('\n');
   }
 
-  const statusKb = () => [[{ text: '🔄 Обновить', callback_data: 'r' }]];
+  const statusKb = () => [[{ text: '🔄 Обновить', callback_data: 'r' }, { text: '▶️ Live', callback_data: 'L:start' }]];
+
+  // ---------- Live: сообщение статуса обновляется само каждые 5 с ----------
+  const LIVE_EVERY_MS = 5000, LIVE_FOR_MS = 10 * 60000;
+  const live = new Map(); // chat -> { mid, until, timer, lastText }
+  const liveKb = () => [[{ text: '⏹ Стоп', callback_data: 'L:stop' }, { text: '⏩ +10 мин', callback_data: 'L:more' }]];
+  const mmss = (ms) => { const sec = Math.max(0, Math.round(ms / 1000)); return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`; };
+  const liveText = (l) => `${statusText()}\n\n🔴 <b>LIVE</b> · обновляется каждые 5 с · ещё ${mmss(l.until - Date.now())}`;
+  async function liveTick(chat) {
+    const l = live.get(chat);
+    if (!l) return;
+    if (Date.now() >= l.until) return stopLive(chat, '⏹ Live завершён (10 минут). Нажмите ▶️ Live, чтобы продолжить.');
+    const text = liveText(l);
+    if (text === l.lastText) return;
+    try {
+      await call('editMessageText', { chat_id: chat, message_id: l.mid, text, parse_mode: 'HTML', reply_markup: { inline_keyboard: liveKb() } });
+      l.lastText = text;
+    } catch (e) {
+      if (/not modified/.test(e.message)) return;
+      if (/message to edit not found|message can't be edited|chat not found|Forbidden/i.test(e.message)) return stopLive(chat, null);
+      log(`telegram: live: ${e.message}`);
+    }
+  }
+  async function stopLive(chat, note) {
+    const l = live.get(chat);
+    if (!l) return;
+    clearInterval(l.timer);
+    live.delete(chat);
+    if (note !== null) await edit(chat, l.mid, `${statusText()}${note ? `\n\n<i>${note}</i>` : ''}`, statusKb());
+  }
+  async function startLive(chat, mid) {
+    if (live.has(chat)) await stopLive(chat, '⏹ Live перенесён в новое сообщение');
+    const l = { mid, until: Date.now() + LIVE_FOR_MS, lastText: '' };
+    l.timer = setInterval(() => liveTick(chat).catch(() => {}), LIVE_EVERY_MS);
+    live.set(chat, l);
+    await liveTick(chat);
+  }
   const stageOpts = () => {
     const items = getControls().items;
     const val = (k) => items.find((i) => i.key === k)?.value;
@@ -425,6 +461,11 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     const [t, key, val] = String(q.data).split(':');
     const answer = (text) => call('answerCallbackQuery', { callback_query_id: q.id, text }).catch(() => {});
     if (t === 'r') { await edit(chat, mid, statusText(), statusKb()); return answer(); }
+    if (t === 'L') {
+      if (key === 'start') { await startLive(chat, mid); return answer('Live: обновление каждые 5 с'); }
+      if (key === 'more') { const l = live.get(chat); if (l) { l.until = Math.min(l.until + LIVE_FOR_MS, Date.now() + 60 * 60000); l.lastText = ''; await liveTick(chat); } return answer('+10 минут'); }
+      if (key === 'stop') { await stopLive(chat, '⏹ Live остановлен'); return answer('Остановлено'); }
+    }
     if (t === 's') { await edit(chat, mid, settingsText(), settingsKb()); return answer(); }
     if (t === 'd') { const back = key === '1' ? 1 : 0; await edit(chat, mid, dayText(back), dayKb(back)); return answer(); }
     if (t === 'n') { // уведомления: явное вкл/выкл, без «переключателя вслепую»
@@ -577,5 +618,5 @@ export function startTelegram({ token, dataDir, getLatest, getStatus, getControl
     }
   })();
 
-  return { onData };
+  return { onData, liveActive: () => live.size > 0 };
 }

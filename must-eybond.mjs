@@ -227,7 +227,7 @@ function announce(loggerIp, host, port) {
 //             мы только ждём его входящих подключений.
 // allowIps:   с каких IP принимать логгер (на VPS это внешний IP дома). Пусто + noAnnounce — любой.
 export async function run({ loggerIp, host, port = 8899, slave = 4, watch = 0, json = false, debug = false,
-  onData, onLog, onReady, signal, noAnnounce = false, allowIps = null }) {
+  onData, onLog, onReady, signal, noAnnounce = false, allowIps = null, getInterval = null }) {
   if (onLog) logSink = onLog;
   if (!noAnnounce) {
     host ||= guessLocalIp(loggerIp);
@@ -336,7 +336,11 @@ export async function run({ loggerIp, host, port = 8899, slave = 4, watch = 0, j
         if (sess) sess.buf = Buffer.alloc(0);
         continue;
       }
-      if (watch) await sleep(watch * 1000);
+      if (watch) {
+        // интервал может меняться на лету (Live-режим бота опрашивает чаще)
+        const started = Date.now();
+        while (!signal?.aborted && Date.now() - started < (getInterval?.() ?? watch) * 1000) await sleep(500);
+      }
     }
   } finally {
     sess?.close();
