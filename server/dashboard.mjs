@@ -109,13 +109,21 @@ function broadcast(event, payload) {
 }
 
 const runtimeEst = createRuntimeEstimator();
+// счётчик заряда батареи переживает перезапуск, если он был недолгим
+const BATTERY_FILE = path.join(DATA_DIR, 'battery.json');
+try { if (runtimeEst.restore(JSON.parse(fs.readFileSync(BATTERY_FILE, 'utf8')))) console.error('батарея: счётчик заряда восстановлен'); } catch { /* нет файла */ }
+let batterySavedAt = 0;
 function onData(d) {
   // оценка времени работы от батареи (ёмкость и тип — из настроек инвертора)
   const gcOn = ctl.registers[20143] == null ? null : ctl.registers[20143] !== 3 ? 1 : 0;
   const bat = batteryFlow((d.batteryPower_W ?? 0) * BATTERY_POWER_SIGN, gcOn, d.pvPower_W);
   const profile = batteryProfile(ctl.registers, d.battVolGrade);
-  runtimeEst.update(d, bat, profile);
+  runtimeEst.update(d, bat, profile, gcOn);
   d.runtime = runtimeEst.estimate(profile);
+  if (Date.now() - batterySavedAt > 60000) {
+    batterySavedAt = Date.now();
+    fs.writeFile(BATTERY_FILE, JSON.stringify(runtimeEst.snapshot()), () => {});
+  }
   latest = d;
   status.connected = true;
   status.lastOk = d.ts;
